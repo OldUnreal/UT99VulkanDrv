@@ -2553,9 +2553,20 @@ static void EnviroMap(const FSceneNode* Frame, FTransTexture& P, FLOAT UScale, F
 	P.V = (T.Y + 1.0f) * 0.5f * 256.0f * VScale;
 }
 
-void UD3D11RenderDevice::DrawGouraudTriangles(const FSceneNode* Frame, const FTextureInfo& Info, FTransTexture* const Pts, INT NumPts, DWORD PolyFlags, DWORD DataFlags, FSpanBuffer* Span)
+void UD3D11RenderDevice::DrawGouraudTriangles(const FSceneNode* Frame, const FTextureInfo& Info, FTransTexture* const InPts, INT NumPts, DWORD PolyFlags, DWORD DataFlags, FSpanBuffer* Span)
 {
 	guardSlow(UD3D11RenderDevice::DrawGouraudTriangles);
+
+	FTransTexture* Pts = InPts;
+	constexpr INT SceneLimit = (SceneIndexBufferSize/3)*3 + 2;
+	constexpr INT PtsMax = SceneVertexBufferSize < SceneLimit ? SceneVertexBufferSize : SceneLimit;
+	constexpr INT PtsLimit = (PtsMax/3)*3; // Ensure we not split triangle by partial draw!
+	while (NumPts > PtsLimit)
+	{
+		DrawGouraudTriangles(Frame, Info, Pts, PtsLimit, PolyFlags, DataFlags, Span);
+		NumPts -= PtsLimit;
+		Pts += PtsLimit;
+	}
 
 	if (NumPts < 3) return; // This can apparently happen!!
 
@@ -2588,7 +2599,7 @@ void UD3D11RenderDevice::DrawGouraudTriangles(const FSceneNode* Frame, const FTe
 	__m128 maskClearW = _mm_castsi128_ps(_mm_setr_epi32(0xffffffff, 0xffffffff, 0xffffffff, 0));
 #endif
 
-	auto alloc = ReserveVertices(NumPts, (NumPts - 2) * 3);
+	auto alloc = ReserveVertices(NumPts, ((NumPts - 2)/3)*3);
 	if (alloc.vptr)
 	{
 		SceneVertex* vptr = alloc.vptr;
