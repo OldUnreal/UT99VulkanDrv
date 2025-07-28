@@ -8,7 +8,7 @@
 
 #ifdef USE_SSE2
 // Unfortunately this code is slower than what the compiler generates on its own ;(
-#undef USE_SSE2
+//#undef USE_SSE2
 #endif
 
 IMPLEMENT_CLASS(UD3D11RenderDevice);
