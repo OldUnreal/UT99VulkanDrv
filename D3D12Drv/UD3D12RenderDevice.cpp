@@ -2756,7 +2756,7 @@ void UD3D12RenderDevice::DrawGouraudTriangles(const FSceneNode* Frame, const FTe
 			::EnviroMap(Frame, Pts[i], UScale, VScale);
 	}
 
-	auto alloc = ReserveVertices(NumPts, (NumPts - 2) * 3);
+	auto alloc = ReserveVertices(NumPts, ((NumPts - 2)/3) * 3);
 	if (alloc.vptr)
 	{
 		SceneVertex* vptr = alloc.vptr;

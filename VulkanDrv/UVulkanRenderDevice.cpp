@@ -1172,7 +1172,7 @@ void UVulkanRenderDevice::DrawGouraudTriangles(const FSceneNode* Frame, const FT
 			::EnviroMap(Frame, Pts[i], UScale, VScale);
 	}
 
-	auto alloc = ReserveVertices(NumPts, (NumPts - 2) * 3);
+	auto alloc = ReserveVertices(NumPts, ((NumPts - 2)/3) * 3);
 	if (alloc.vptr)
 	{
 		SceneVertex* vptr = alloc.vptr;
