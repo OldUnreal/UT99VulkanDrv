@@ -36,7 +36,34 @@
 
 #include <cstring>
 
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <limits.h>
+#include <stdlib.h>
+#define MAX_PATH PATH_MAX
+#endif
+
 namespace glslang {
+
+// Buggie: simple replacement of std::filesystem::absolute for get rid of <filesystem> dependecy.
+// Such dependency make impossible compile single .so library for Ubuntu 20+ and Ubuntu < 20.
+std::string filesystem_absolute(const std::string& path)
+{
+	char buffer[MAX_PATH + 1];
+	buffer[MAX_PATH] = 0;
+#ifdef _WIN32
+	// Windows version: resolve absolute path with ANSI API
+	DWORD ret = GetFullPathNameA(path.c_str(), MAX_PATH, buffer, nullptr);
+	if (ret == 0 || ret > MAX_PATH)
+#else
+	// Returns an absolute path for POSIX using realpath
+	// realpath allocates if second argument is NULL on GNU, but to be portable, use buffer
+	if (!realpath(path.c_str(), buffer))
+#endif
+		return path;  // on error, return input
+	return std::string(buffer);
+}
 
 void TInfoSinkBase::append(const char* s)
 {

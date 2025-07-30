@@ -36,10 +36,11 @@
 #define _INFOSINK_INCLUDED_
 
 #include "../Include/Common.h"
-#include <filesystem>
 #include <cmath>
 
 namespace glslang {
+
+std::string filesystem_absolute(const std::string& path);
 
 //
 // TPrefixType is used to centralize how info log messages start.
