@@ -102,11 +102,11 @@ public:
         snprintf(locText, maxSize, ":%d", loc.line);
 
         if(loc.getFilename() == nullptr && shaderFileName != nullptr && absolute) {
-            append(std::filesystem::absolute(shaderFileName).string());
+            append(filesystem_absolute(shaderFileName));
         } else {
             std::string location = loc.getStringNameOrNum(false);
             if (absolute) {
-                append(std::filesystem::absolute(location).string());
+                append(filesystem_absolute(location));
             } else {
                 append(location);
             }
