@@ -2139,7 +2139,8 @@ void UD3D11RenderDevice::DrawComplexSurface(FSceneNode* Frame, FSurfaceInfo& Sur
 
 	ComplexSurfaceInfo info;
 	info.facet = &Facet;
-	info.tex = Textures->GetTexture(Surface.Texture, !!(PolyFlags & PF_Masked));
+	info.tex = Textures->GetTexture(Surface.Texture, (PolyFlags & PF_Masked) || 
+		(Surface.Texture->Texture && (Surface.Texture->Texture->PolyFlags & PF_Masked)));
 	info.lightmap = Textures->GetTexture(Surface.LightMap, false);
 	info.macrotex = Textures->GetTexture(Surface.MacroTexture, false);
 	info.detailtex = Textures->GetTexture(Surface.DetailTexture, false);
@@ -2773,7 +2774,8 @@ void UD3D11RenderDevice::DrawTileList(const FSceneNode* Frame, const FTextureInf
 
 	PolyFlags = ApplyPrecedenceRules(PolyFlags);
 
-	CachedTexture* tex = Textures->GetTexture(const_cast<FTextureInfo*>(&Info), !!(PolyFlags & PF_Masked));
+	CachedTexture* tex = Textures->GetTexture(const_cast<FTextureInfo*>(&Info), (PolyFlags & PF_Masked) || 
+		(Info.Texture && (Info.Texture->PolyFlags & PF_Masked)));
 	float UMult = tex->UMult;
 	float VMult = tex->VMult;
 	int curclampmode = -1;
@@ -2949,7 +2951,8 @@ void UD3D11RenderDevice::DrawTile(FSceneNode* Frame, FTextureInfo& Info, FLOAT X
 
 	PolyFlags = ApplyPrecedenceRules(PolyFlags);
 
-	CachedTexture* tex = Textures->GetTexture(&Info, !!(PolyFlags & PF_Masked));
+	CachedTexture* tex = Textures->GetTexture(&Info, (PolyFlags & PF_Masked) || 
+		(Info.Texture && (Info.Texture->PolyFlags & PF_Masked)));
 	float UMult = tex->UMult;
 	float VMult = tex->VMult;
 	float u0 = U * UMult;
