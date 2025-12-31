@@ -41,7 +41,7 @@ CachedTexture* TextureManager::GetTexture(FTextureInfo* info, bool masked)
 	else if (info->bRealtimeChanged && (!info->Texture || info->Texture->RealtimeChangeCount != tex->RealtimeChangeCount))
 	{
 		if (info->Texture)
-			info->Texture->RealtimeChangeCount = tex->RealtimeChangeCount;
+			tex->RealtimeChangeCount = info->Texture->RealtimeChangeCount;
 		info->bRealtimeChanged = 0;
 		renderer->Uploads->UploadTexture(tex.get(), *info, masked);
 	}

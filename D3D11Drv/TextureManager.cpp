@@ -88,7 +88,7 @@ void TextureManager::UploadTexture(FTextureInfo* info, bool masked, CachedTextur
 		renderer->Timers.TextureUpload.Clock();
 
 		if (info->Texture)
-			info->Texture->RealtimeChangeCount = tex->RealtimeChangeCount;
+			tex->RealtimeChangeCount = info->Texture->RealtimeChangeCount;
 		info->bRealtimeChanged = 0;
 		renderer->Uploads->UploadTexture(tex, *info, masked);
 
