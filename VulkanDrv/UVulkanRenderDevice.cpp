@@ -6,7 +6,52 @@
 #include <stdexcept>
 
 #if !defined(WIN32)
+#if SDL2BUILD
 #include <SDL2/SDL_vulkan.h>
+#elif SDL3BUILD
+#include <SDL3/SDL_vulkan.h>
+#else
+#error "Either SDL2BUILD or SDL3BUILD must be enabled."
+#endif
+
+static bool SDLVulkanGetInstanceExtensionsCompat(SDL_Window* window, std::vector<const char*>& outExtensions)
+{
+#if SDL2BUILD
+	unsigned int extCount = 0;
+	if (SDL_Vulkan_GetInstanceExtensions(window, &extCount, nullptr) != SDL_TRUE)
+		return false;
+
+	outExtensions.resize(extCount);
+	return SDL_Vulkan_GetInstanceExtensions(window, &extCount, outExtensions.data()) == SDL_TRUE;
+#else
+	Uint32 extCount = 0;
+	const char* const* extNames = SDL_Vulkan_GetInstanceExtensions(&extCount);
+	if (!extNames && extCount > 0)
+		return false;
+
+	outExtensions.assign(extNames, extNames + extCount);
+	return true;
+#endif
+}
+
+static bool SDLVulkanCreateSurfaceCompat(SDL_Window* window, VkInstance instance, VkSurfaceKHR* surface)
+{
+#if SDL2BUILD
+	return SDL_Vulkan_CreateSurface(window, instance, surface) == SDL_TRUE;
+#else
+	return SDL_Vulkan_CreateSurface(window, instance, nullptr, surface);
+#endif
+}
+
+static void SDLVulkanGetDrawableSizeCompat(SDL_Window* window, int* w, int* h)
+{
+#if SDL2BUILD
+	SDL_Vulkan_GetDrawableSize(window, w, h);
+#else
+	if (!SDL_GetWindowSizeInPixels(window, w, h))
+		SDL_GetWindowSize(window, w, h);
+#endif
+}
 #endif
 
 IMPLEMENT_CLASS(UVulkanRenderDevice);
@@ -167,10 +212,12 @@ UBOOL UVulkanRenderDevice::Init(UViewport* InViewport, INT NewX, INT NewY, INT N
 		instanceBuilder.OptionalExtension(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME); // For HDR support
 		instanceBuilder.DebugLayer(VkDebug);
 
-		unsigned int extCount = 0;
-		SDL_Vulkan_GetInstanceExtensions(window, &extCount, nullptr);
-		std::vector<const char*> extNames(extCount);
-		SDL_Vulkan_GetInstanceExtensions(window, &extCount, extNames.data());
+		std::vector<const char*> extNames;
+		if (!SDLVulkanGetInstanceExtensionsCompat(window, extNames))
+		{
+			debugf(TEXT("Couldn't query Vulkan instance extensions: %ls"), appFromAnsi(SDL_GetError()));
+			return 0;
+		}
 		for (const char* name : extNames)
 		{
 			instanceBuilder.RequireExtension(name);
@@ -180,7 +227,7 @@ UBOOL UVulkanRenderDevice::Init(UViewport* InViewport, INT NewX, INT NewY, INT N
 		auto deviceBuilder = VulkanDeviceBuilder();
 
 		VkSurfaceKHR surfaceHandle = {};
-		if (SDL_Vulkan_CreateSurface(window, instance->Instance, &surfaceHandle) == SDL_FALSE)
+		if (!SDLVulkanCreateSurfaceCompat(window, instance->Instance, &surfaceHandle))
 		{
 			debugf(TEXT("Couldn't create Vulkan surface: %ls"), appFromAnsi(SDL_GetError()));
 			return 0;
@@ -740,7 +787,7 @@ void UVulkanRenderDevice::Unlock(UBOOL Blit)
 		auto window = (SDL_Window*)Viewport->GetWindow();
 		int windowWidth = 0;
 		int windowHeight = 0;
-		SDL_GL_GetDrawableSize(window, &windowWidth, &windowHeight);
+		SDLVulkanGetDrawableSizeCompat(window, &windowWidth, &windowHeight);
 #endif
 
 		SubmitAndWait(Blit ? true : false, windowWidth, windowHeight, Viewport->IsFullscreen());
