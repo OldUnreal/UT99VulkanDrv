@@ -3342,6 +3342,10 @@ void UD3D12RenderDevice::DrawBatches(bool nextBuffer)
 
 	if (!QueuedBatches.empty())
 	{
+		// Buggie: Ensure we create and upload NullTexture before calling SetGraphicsRootSignature, 
+		// to avoid losing the RootSignature state and crashing in SetGraphicsRootDescriptorTable.
+		Textures->GetNullTexture();
+
 		D3D12_CPU_DESCRIPTOR_HANDLE views[2] = { SceneBuffers.SceneRTVs.CPUHandle(0), SceneBuffers.SceneRTVs.CPUHandle(1) };
 		D3D12_CPU_DESCRIPTOR_HANDLE depthview = SceneBuffers.SceneDSV.CPUHandle();
 
