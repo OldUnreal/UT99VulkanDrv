@@ -155,6 +155,9 @@ private:
 
 	VertexReserveInfo ReserveVertices(size_t vcount, size_t icount)
 	{
+		size_t& SceneVertexPos = SceneVertexPositions[CurrentFrameIndex];
+		size_t& SceneIndexPos = SceneIndexPositions[CurrentFrameIndex];
+
 		// If buffers are full, flush and wait for room.
 		if (SceneVertexPos + vcount > (size_t)BufferManager::SceneVertexBufferSize || SceneIndexPos + icount > (size_t)BufferManager::SceneIndexBufferSize)
 		{
@@ -165,13 +168,16 @@ private:
 			FlushDrawBatchAndWait();
 		}
 
-		return { Buffers->SceneVertices + SceneVertexPos, Buffers->SceneIndexes + SceneIndexPos, (uint32_t)SceneVertexPos };
+		return { Buffers->SceneVerticesArray[CurrentFrameIndex] + SceneVertexPos, Buffers->SceneIndexesArray[CurrentFrameIndex] + SceneIndexPos, (uint32_t)SceneVertexPos };
 	}
 
 	void FlushDrawBatchAndWait();
 
 	void UseVertices(size_t vcount, size_t icount)
 	{
+		size_t& SceneVertexPos = SceneVertexPositions[CurrentFrameIndex];
+		size_t& SceneIndexPos = SceneIndexPositions[CurrentFrameIndex];
+
 		SceneVertexPos += vcount;
 		SceneIndexPos += icount;
 	}
@@ -205,8 +211,8 @@ private:
 
 	ScenePushConstants pushconstants;
 
-	size_t SceneVertexPos = 0;
-	size_t SceneIndexPos = 0;
+	std::array<size_t, MAX_FRAMES_IN_FLIGHT> SceneVertexPositions = { 0 };
+	std::array<size_t, MAX_FRAMES_IN_FLIGHT> SceneIndexPositions = { 0 };
 
 	struct HitQuery
 	{

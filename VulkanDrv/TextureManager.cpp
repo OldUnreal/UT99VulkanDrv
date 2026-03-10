@@ -116,7 +116,7 @@ void TextureManager::CreateNullTexture()
 		.AddImage(NullTexture.get(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT)
 		.Execute(cmdbuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
 
-	renderer->Commands->FrameDeleteList->buffers.push_back(std::move(stagingbuffer));
+	renderer->Commands->GetCurrentDeleteList()->buffers.push_back(std::move(stagingbuffer));
 }
 
 void TextureManager::CreateDitherTexture()
@@ -171,5 +171,5 @@ void TextureManager::CreateDitherTexture()
 		.AddImage(DitherImage.get(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT)
 		.Execute(cmdbuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
 
-	renderer->Commands->FrameDeleteList->buffers.push_back(std::move(stagingbuffer));
+	renderer->Commands->GetCurrentDeleteList()->buffers.push_back(std::move(stagingbuffer));
 }

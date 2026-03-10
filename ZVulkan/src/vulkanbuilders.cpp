@@ -255,7 +255,7 @@ FenceBuilder::FenceBuilder()
 
 std::unique_ptr<VulkanFence> FenceBuilder::Create(VulkanDevice* device)
 {
-	auto obj = std::make_unique<VulkanFence>(device);
+	auto obj = std::make_unique<VulkanFence>(device, createFlags);
 	if (debugName)
 		obj->SetDebugName(debugName);
 	return obj;

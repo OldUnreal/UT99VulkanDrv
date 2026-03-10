@@ -30,6 +30,5 @@ private:
 
 	UVulkanRenderDevice* renderer = nullptr;
 
-	int UploadBufferPos = 0;
 	std::vector<CachedTexture*> PendingUploads;
 };

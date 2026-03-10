@@ -77,7 +77,8 @@ void UploadManager::UploadTextureRect(CachedTexture* tex, const FTextureInfo& In
 
 	WaitIfUploadBufferIsFull(pixelsSize);
 
-	uint8_t* data = renderer->Buffers->UploadData;
+	uint8_t* data = renderer->Buffers->UploadDataArray[CurrentFrameIndex];
+	size_t& UploadBufferPos = renderer->Buffers->UploadBufferPositions[CurrentFrameIndex];
 	uint8_t* Ptr = data + UploadBufferPos;
 	uploader->UploadRect(Ptr, Info.Mips[0], x, y, w, h, Info.Palette, false);
 
@@ -110,6 +111,8 @@ void UploadManager::UploadData(CachedTexture* tex, const FTextureInfo& Info, boo
 
 	WaitIfUploadBufferIsFull(pixelsSize);
 
+	size_t& UploadBufferPos = renderer->Buffers->UploadBufferPositions[CurrentFrameIndex];
+	uint8_t* UploadData = renderer->Buffers->UploadDataArray[CurrentFrameIndex];
 	for (INT level = 0; level < Info.NumMips; level++)
 	{
 		FMipmapBase* Mip = Info.Mips[level];
@@ -127,7 +130,7 @@ void UploadManager::UploadData(CachedTexture* tex, const FTextureInfo& Info, boo
 			region.imageExtent = { mipwidth, mipheight, 1 };
 			AddPendingUpload(tex, region, false);
 
-			uploader->UploadRect(renderer->Buffers->UploadData + UploadBufferPos, Mip, 0, 0, Mip->USize, Mip->VSize, Info.Palette, masked);
+			uploader->UploadRect(UploadData + UploadBufferPos, Mip, 0, 0, Mip->USize, Mip->VSize, Info.Palette, masked);
 
 			INT mipsize = uploader->GetUploadSize(0, 0, Mip->USize, Mip->VSize);
 			mipsize = (mipsize + 15) / 16 * 16; // memory alignment
@@ -140,7 +143,8 @@ void UploadManager::UploadWhite(CachedTexture* tex)
 {
 	WaitIfUploadBufferIsFull(16);
 
-	auto data = (uint32_t*)(renderer->Buffers->UploadData + UploadBufferPos);
+	size_t& UploadBufferPos = renderer->Buffers->UploadBufferPositions[CurrentFrameIndex];
+	auto data = (uint32_t*)(renderer->Buffers->UploadDataArray[CurrentFrameIndex] + UploadBufferPos);
 	data[0] = 0xffffffff;
 
 	VkBufferImageCopy region = {};
@@ -155,7 +159,8 @@ void UploadManager::UploadWhite(CachedTexture* tex)
 
 void UploadManager::WaitIfUploadBufferIsFull(int bytes)
 {
-	if (UploadBufferPos + bytes > BufferManager::UploadBufferSize)
+	size_t UploadBufferPos = renderer->Buffers->UploadBufferPositions[CurrentFrameIndex];
+	if (UploadBufferPos + (size_t)bytes > (size_t)BufferManager::UploadBufferSize)
 	{
 		renderer->Commands->WaitForTransfer();
 	}
@@ -200,7 +205,7 @@ void UploadManager::SubmitUploads()
 	for (int i = 0; i < 2; i++)
 	{
 		// Copy from buffer to images
-		VkBuffer buffer = renderer->Buffers->UploadBuffer->buffer;
+		VkBuffer buffer = renderer->Buffers->UploadBuffers[CurrentFrameIndex]->buffer;
 		for (CachedTexture* tex : PendingUploads)
 		{
 			if (!tex->pendingUploads[i].empty())
@@ -240,5 +245,5 @@ void UploadManager::SubmitUploads()
 		tex->inPendingUploads = false;
 	}
 	PendingUploads.clear();
-	UploadBufferPos = 0;
+	renderer->Buffers->UploadBufferPositions[CurrentFrameIndex] = 0;
 }

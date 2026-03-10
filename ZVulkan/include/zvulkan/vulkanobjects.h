@@ -26,6 +26,7 @@ class VulkanFence
 {
 public:
 	VulkanFence(VulkanDevice *device);
+	VulkanFence(VulkanDevice *device, VkFenceCreateFlags flags);
 	~VulkanFence();
 
 	void SetDebugName(const char *name) { device->SetObjectName(name, (uint64_t)fence, VK_OBJECT_TYPE_FENCE); }
@@ -483,6 +484,15 @@ inline VulkanFence::VulkanFence(VulkanDevice *device) : device(device)
 {
 	VkFenceCreateInfo fenceInfo = {};
 	fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+	VkResult result = vkCreateFence(device->device, &fenceInfo, nullptr, &fence);
+	CheckVulkanError(result, "Could not create fence!");
+}
+
+inline VulkanFence::VulkanFence(VulkanDevice *device, VkFenceCreateFlags flags) : device(device)
+{
+	VkFenceCreateInfo fenceInfo = {};
+	fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+	fenceInfo.flags = flags;
 	VkResult result = vkCreateFence(device->device, &fenceInfo, nullptr, &fence);
 	CheckVulkanError(result, "Could not create fence!");
 }

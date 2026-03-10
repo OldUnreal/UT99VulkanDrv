@@ -53,3 +53,6 @@
 #if defined(OLDUNREAL469SDK)
 #include "Render.h"
 #endif
+
+constexpr int MAX_FRAMES_IN_FLIGHT = 2;
+extern uint32_t CurrentFrameIndex;

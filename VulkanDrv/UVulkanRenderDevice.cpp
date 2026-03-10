@@ -5,6 +5,8 @@
 #include <cmath>
 #include <stdexcept>
 
+uint32_t CurrentFrameIndex = 0;
+
 #if !defined(WIN32)
 #if SDL2BUILD
 #include <SDL2/SDL_vulkan.h>
@@ -255,10 +257,10 @@ UBOOL UVulkanRenderDevice::Init(UViewport* InViewport, INT NewX, INT NewY, INT N
 			return 0;
 		}
 
+		Buffers.reset(new BufferManager(this));
 		Commands.reset(new CommandBufferManager(this));
 		Samplers.reset(new SamplerManager(this));
 		Textures.reset(new TextureManager(this));
-		Buffers.reset(new BufferManager(this));
 		Shaders.reset(new ShaderManager(this));
 		Uploads.reset(new UploadManager(this));
 		DescriptorSets.reset(new DescriptorSetManager(this));
@@ -432,8 +434,8 @@ void UVulkanRenderDevice::SubmitAndWait(bool present, int presentWidth, int pres
 	Commands->SubmitCommands(present, presentWidth, presentHeight, presentFullscreen);
 
 	Batch.SceneIndexStart = 0;
-	SceneVertexPos = 0;
-	SceneIndexPos = 0;
+	SceneVertexPositions[CurrentFrameIndex] = 0;
+	SceneIndexPositions[CurrentFrameIndex] = 0;
 }
 
 #if defined(UNREALGOLD)
@@ -453,10 +455,10 @@ void UVulkanRenderDevice::Flush()
 		auto cmdbuffer = Commands->GetDrawCommands();
 		RenderPasses->BeginScene(cmdbuffer, 0.0f, 0.0f, 0.0f, 1.0f);
 
-		VkBuffer vertexBuffers[] = { Buffers->SceneVertexBuffer->buffer };
+		VkBuffer vertexBuffers[] = { Buffers->SceneVertexBuffers[CurrentFrameIndex]->buffer };
 		VkDeviceSize offsets[] = { 0 };
 		cmdbuffer->bindVertexBuffers(0, 1, vertexBuffers, offsets);
-		cmdbuffer->bindIndexBuffer(Buffers->SceneIndexBuffer->buffer, 0, VK_INDEX_TYPE_UINT32);
+		cmdbuffer->bindIndexBuffer(Buffers->SceneIndexBuffers[CurrentFrameIndex]->buffer, 0, VK_INDEX_TYPE_UINT32);
 	}
 	else
 	{
@@ -507,10 +509,10 @@ void UVulkanRenderDevice::Flush(UBOOL AllowPrecache)
 			.AddClearDepthStencil(1.0f, 0)
 			.Execute(cmdbuffer);
 
-		VkBuffer vertexBuffers[] = { Buffers->SceneVertexBuffer->buffer };
+		VkBuffer vertexBuffers[] = { Buffers->SceneVertexBuffers[CurrentFrameIndex]->buffer };
 		VkDeviceSize offsets[] = { 0 };
 		cmdbuffer->bindVertexBuffers(0, 1, vertexBuffers, offsets);
-		cmdbuffer->bindIndexBuffer(Buffers->SceneIndexBuffer->buffer, 0, VK_INDEX_TYPE_UINT32);
+		cmdbuffer->bindIndexBuffer(Buffers->SceneIndexBuffers[CurrentFrameIndex]->buffer, 0, VK_INDEX_TYPE_UINT32);
 	}
 	else
 	{
@@ -694,10 +696,10 @@ void UVulkanRenderDevice::Lock(FPlane InFlashScale, FPlane InFlashFog, FPlane Sc
 			.AddClearDepthStencil(1.0f, 0)
 			.Execute(cmdbuffer);
 
-		VkBuffer vertexBuffers[] = { Buffers->SceneVertexBuffer->buffer };
+		VkBuffer vertexBuffers[] = { Buffers->SceneVertexBuffers[CurrentFrameIndex]->buffer };
 		VkDeviceSize offsets[] = { 0 };
 		cmdbuffer->bindVertexBuffers(0, 1, vertexBuffers, offsets);
-		cmdbuffer->bindIndexBuffer(Buffers->SceneIndexBuffer->buffer, 0, VK_INDEX_TYPE_UINT32);
+		cmdbuffer->bindIndexBuffer(Buffers->SceneIndexBuffers[CurrentFrameIndex]->buffer, 0, VK_INDEX_TYPE_UINT32);
 
 		IsLocked = true;
 	}
@@ -740,10 +742,10 @@ void UVulkanRenderDevice::FlushDrawBatchAndWait()
 		.RenderArea(0, 0, Textures->Scene->Width, Textures->Scene->Height)
 		.Execute(drawcommands);
 
-	VkBuffer vertexBuffers[] = { Buffers->SceneVertexBuffer->buffer };
+	VkBuffer vertexBuffers[] = { Buffers->SceneVertexBuffers[CurrentFrameIndex]->buffer };
 	VkDeviceSize offsets[] = { 0 };
 	drawcommands->bindVertexBuffers(0, 1, vertexBuffers, offsets);
-	drawcommands->bindIndexBuffer(Buffers->SceneIndexBuffer->buffer, 0, VK_INDEX_TYPE_UINT32);
+	drawcommands->bindIndexBuffer(Buffers->SceneIndexBuffers[CurrentFrameIndex]->buffer, 0, VK_INDEX_TYPE_UINT32);
 	drawcommands->setViewport(0, 1, &viewportdesc);
 }
 
@@ -878,6 +880,7 @@ void UVulkanRenderDevice::UpdateTextureRect(FTextureInfo& Info, INT U, INT V, IN
 
 void UVulkanRenderDevice::DrawBatch(VulkanCommandBuffer* cmdbuffer)
 {
+	size_t SceneIndexPos = SceneIndexPositions[CurrentFrameIndex];
 	size_t icount = SceneIndexPos - Batch.SceneIndexStart;
 	if (icount > 0)
 	{

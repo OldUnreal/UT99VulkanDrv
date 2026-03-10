@@ -1,5 +1,8 @@
 #pragma once
 
+#include <array>
+#include <cstdint>
+
 class UVulkanRenderDevice;
 
 class CommandBufferManager
@@ -8,6 +11,7 @@ public:
 	CommandBufferManager(UVulkanRenderDevice* renderer);
 	~CommandBufferManager();
 
+	void BeginFrame();
 	void WaitForTransfer();
 	void SubmitCommands(bool present, int presentWidth, int presentHeight, bool presentFullscreen);
 	VulkanCommandBuffer* GetTransferCommands();
@@ -21,7 +25,8 @@ public:
 		std::vector<std::unique_ptr<VulkanBuffer>> buffers;
 		std::vector<std::unique_ptr<VulkanDescriptorSet>> descriptors;
 	};
-	std::unique_ptr<DeleteList> FrameDeleteList;
+	std::array<std::unique_ptr<DeleteList>, MAX_FRAMES_IN_FLIGHT> FrameDeleteLists;
+	DeleteList* GetCurrentDeleteList() { return FrameDeleteLists[CurrentFrameIndex].get(); }
 
 	std::shared_ptr<VulkanSwapChain> SwapChain;
 	int PresentImageIndex = -1;
@@ -31,11 +36,17 @@ public:
 private:
 	UVulkanRenderDevice* renderer = nullptr;
 
-	std::unique_ptr<VulkanSemaphore> ImageAvailableSemaphore;
-	std::unique_ptr<VulkanSemaphore> RenderFinishedSemaphore;
-	std::unique_ptr<VulkanSemaphore> TransferSemaphore;
-	std::unique_ptr<VulkanFence> RenderFinishedFence;
+	std::array<std::unique_ptr<VulkanSemaphore>, MAX_FRAMES_IN_FLIGHT> ImageAvailableSemaphores;
+	std::array<std::unique_ptr<VulkanSemaphore>, MAX_FRAMES_IN_FLIGHT> RenderFinishedSemaphores;
+	std::array<std::unique_ptr<VulkanSemaphore>, MAX_FRAMES_IN_FLIGHT> DrawFinishedSemaphores;
+	std::array<std::unique_ptr<VulkanSemaphore>, MAX_FRAMES_IN_FLIGHT> TransferSemaphores;
+	std::array<std::unique_ptr<VulkanFence>, MAX_FRAMES_IN_FLIGHT> RenderFinishedFences;
 	std::unique_ptr<VulkanCommandPool> CommandPool;
-	std::unique_ptr<VulkanCommandBuffer> DrawCommands;
-	std::unique_ptr<VulkanCommandBuffer> TransferCommands;
+	std::array<std::unique_ptr<VulkanCommandBuffer>, MAX_FRAMES_IN_FLIGHT> DrawCommandsArray;
+	std::array<std::unique_ptr<VulkanCommandBuffer>, MAX_FRAMES_IN_FLIGHT> TransferCommandsArray;
+
+	bool FrameBegun = false;
+	bool IsFirstFrame = true;
+	std::array<bool, MAX_FRAMES_IN_FLIGHT> DrawCommandsBegun = {};
+	std::array<bool, MAX_FRAMES_IN_FLIGHT> TransferCommandsBegun = {};
 };

@@ -107,11 +107,13 @@ public:
 	FenceBuilder();
 
 	FenceBuilder& DebugName(const char* name) { debugName = name; return *this; }
+	FenceBuilder& Flags(VkFenceCreateFlags flags) { createFlags = flags; return *this; }
 
 	std::unique_ptr<VulkanFence> Create(VulkanDevice* device);
 
 private:
 	const char* debugName = nullptr;
+	VkFenceCreateFlags createFlags = 0;
 };
 
 class ImageBuilder
