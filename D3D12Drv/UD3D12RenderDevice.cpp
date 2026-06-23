@@ -3108,7 +3108,7 @@ void UD3D12RenderDevice::GetStats(TCHAR* Result)
 
 void UD3D12RenderDevice::ReadPixels(FColor* Pixels)
 {
-	guard(UD3D12RenderDevice::GetStats);
+	guard(UD3D12RenderDevice::ReadPixels);
 
 	ID3D12Resource* imageResource = nullptr;
 

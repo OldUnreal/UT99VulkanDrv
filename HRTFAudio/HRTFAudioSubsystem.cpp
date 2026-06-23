@@ -179,7 +179,7 @@ void UHRTFAudioSubsystem::Update(FPointRegion Region, FCoords& Listener)
 
 void UHRTFAudioSubsystem::StartAmbience()
 {
-	guard(StartAmbience);
+	guard(UHRTFAudioSubsystem::StartAmbience);
 	UBOOL Realtime = Viewport->IsRealtime() && Viewport->Actor->Level->Pauser == TEXT("");
 	if (Realtime)
 	{
@@ -209,7 +209,7 @@ void UHRTFAudioSubsystem::StartAmbience()
 
 void UHRTFAudioSubsystem::UpdateAmbience()
 {
-	guard(UpdateAmbience);
+	guard(UHRTFAudioSubsystem::UpdateAmbience);
 	AActor* ViewActor = Viewport->Actor->ViewTarget ? Viewport->Actor->ViewTarget : Viewport->Actor;
 	UBOOL Realtime = Viewport->IsRealtime() && Viewport->Actor->Level->Pauser == TEXT("");
 	for (size_t i = 0; i < PlayingSounds.size(); i++)
@@ -238,7 +238,7 @@ void UHRTFAudioSubsystem::UpdateAmbience()
 
 void UHRTFAudioSubsystem::UpdateSounds(FCoords& Listener)
 {
-	guard(UpdateSounds);
+	guard(UHRTFAudioSubsystem::UpdateSounds);
 	AActor* ViewActor = Viewport->Actor->ViewTarget ? Viewport->Actor->ViewTarget : Viewport->Actor;
 	for (size_t i = 0; i < PlayingSounds.size(); i++)
 	{
@@ -335,7 +335,7 @@ void UHRTFAudioSubsystem::UpdateSounds(FCoords& Listener)
 
 void UHRTFAudioSubsystem::UpdateMusic()
 {
-	guard(UpdateMusic);
+	guard(UHRTFAudioSubsystem::UpdateMusic);
 	if (Viewport->Actor && Viewport->Actor->Transition != MTRAN_None)
 	{
 		// To do: this needs to fade out the old song before switching

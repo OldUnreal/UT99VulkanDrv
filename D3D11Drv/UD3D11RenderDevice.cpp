@@ -3258,7 +3258,7 @@ void UD3D11RenderDevice::GetStats(TCHAR* Result)
 
 void UD3D11RenderDevice::ReadPixels(FColor* Pixels)
 {
-	guard(UD3D11RenderDevice::GetStats);
+	guard(UD3D11RenderDevice::ReadPixels);
 
 	UnmapVertices();
 

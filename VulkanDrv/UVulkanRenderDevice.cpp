@@ -1630,7 +1630,7 @@ void UVulkanRenderDevice::GetStats(TCHAR* Result)
 
 void UVulkanRenderDevice::ReadPixels(FColor* Pixels)
 {
-	guard(UVulkanRenderDevice::GetStats);
+	guard(UVulkanRenderDevice::ReadPixels);
 
 	auto cmdbuffer = Commands->GetDrawCommands();
 
