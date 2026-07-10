@@ -19,6 +19,8 @@ uint32_t CurrentFrameIndex = 0;
 static bool SDLVulkanGetInstanceExtensionsCompat(SDL_Window* window, std::vector<const char*>& outExtensions)
 {
 #if SDL2BUILD
+	if (SDL_Vulkan_LoadLibrary(nullptr) != 0)
+		return false;
 	unsigned int extCount = 0;
 	if (SDL_Vulkan_GetInstanceExtensions(window, &extCount, nullptr) != SDL_TRUE)
 		return false;
@@ -26,6 +28,8 @@ static bool SDLVulkanGetInstanceExtensionsCompat(SDL_Window* window, std::vector
 	outExtensions.resize(extCount);
 	return SDL_Vulkan_GetInstanceExtensions(window, &extCount, outExtensions.data()) == SDL_TRUE;
 #else
+	if (!SDL_Vulkan_LoadLibrary(nullptr))
+		return false;
 	Uint32 extCount = 0;
 	const char* const* extNames = SDL_Vulkan_GetInstanceExtensions(&extCount);
 	if (!extNames && extCount > 0)
