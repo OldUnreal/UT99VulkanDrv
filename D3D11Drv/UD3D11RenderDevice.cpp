@@ -77,6 +77,22 @@ void UD3D11RenderDevice::StaticConstructor()
 	GammaCorrectScreenshots = 1;
 	UseDebugLayer = 0;
 
+	UseVR = 0; // opt-in (VR users are rare). Once on, the Init probe auto-detects the headset (else mono).
+	VRWorldScale = 52.5f;
+	VRHudDepth = 150.0f;
+	VRUIDepth = 150.0f;
+	VRCrosshairDepth = 150.0f;
+	VRResScale = 1.5f;
+	VRHeightOffset = 0.0f;
+	VRClearZBeforeHud = 1;
+	VRLookMode = 0;
+	VRHudScaleX = 1.0f;
+	VRHudScaleY = 1.0f;
+	VRWeaponIPDScale = 1.0f;
+	VRBrightnessScale = 1.0f;
+	VRBrightnessOffset = 0.0f;
+	VRMirrorMode = 1; // 0=off, 1=when headset removed, 2=in menu, 3=always
+
 #if defined(OLDUNREAL469SDK)
 	new(GetClass(), TEXT("UseLightmapAtlas"), RF_Public) UBoolProperty(CPP_PROPERTY(UseLightmapAtlas), TEXT("Display"), CPF_Config);
 #endif
@@ -85,6 +101,21 @@ void UD3D11RenderDevice::StaticConstructor()
 	new(GetClass(), TEXT("UsePrecache"), RF_Public) UBoolProperty(CPP_PROPERTY(UsePrecache), TEXT("Display"), CPF_Config);
 	new(GetClass(), TEXT("GammaCorrectScreenshots"), RF_Public) UBoolProperty(CPP_PROPERTY(GammaCorrectScreenshots), TEXT("Display"), CPF_Config);
 	new(GetClass(), TEXT("UseDebugLayer"), RF_Public) UBoolProperty(CPP_PROPERTY(UseDebugLayer), TEXT("Display"), CPF_Config);
+	new(GetClass(), TEXT("UseVR"), RF_Public) UBoolProperty(CPP_PROPERTY(UseVR), TEXT("Display"), CPF_Config);
+	new(GetClass(), TEXT("VRWorldScale"), RF_Public) UFloatProperty(CPP_PROPERTY(VRWorldScale), TEXT("Display"), CPF_Config);
+	new(GetClass(), TEXT("VRHudDepth"), RF_Public) UFloatProperty(CPP_PROPERTY(VRHudDepth), TEXT("Display"), CPF_Config);
+	new(GetClass(), TEXT("VRUIDepth"), RF_Public) UFloatProperty(CPP_PROPERTY(VRUIDepth), TEXT("Display"), CPF_Config);
+	new(GetClass(), TEXT("VRCrosshairDepth"), RF_Public) UFloatProperty(CPP_PROPERTY(VRCrosshairDepth), TEXT("Display"), CPF_Config);
+	new(GetClass(), TEXT("VRResScale"), RF_Public) UFloatProperty(CPP_PROPERTY(VRResScale), TEXT("Display"), CPF_Config);
+	new(GetClass(), TEXT("VRHeightOffset"), RF_Public) UFloatProperty(CPP_PROPERTY(VRHeightOffset), TEXT("Display"), CPF_Config);
+	new(GetClass(), TEXT("VRClearZBeforeHud"), RF_Public) UBoolProperty(CPP_PROPERTY(VRClearZBeforeHud), TEXT("Display"), CPF_Config);
+	new(GetClass(), TEXT("VRLookMode"), RF_Public) UByteProperty(CPP_PROPERTY(VRLookMode), TEXT("Display"), CPF_Config);
+	new(GetClass(), TEXT("VRHudScaleX"), RF_Public) UFloatProperty(CPP_PROPERTY(VRHudScaleX), TEXT("Display"), CPF_Config);
+	new(GetClass(), TEXT("VRHudScaleY"), RF_Public) UFloatProperty(CPP_PROPERTY(VRHudScaleY), TEXT("Display"), CPF_Config);
+	new(GetClass(), TEXT("VRWeaponIPDScale"), RF_Public) UFloatProperty(CPP_PROPERTY(VRWeaponIPDScale), TEXT("Display"), CPF_Config);
+	new(GetClass(), TEXT("VRBrightnessScale"), RF_Public) UFloatProperty(CPP_PROPERTY(VRBrightnessScale), TEXT("Display"), CPF_Config);
+	new(GetClass(), TEXT("VRBrightnessOffset"), RF_Public) UFloatProperty(CPP_PROPERTY(VRBrightnessOffset), TEXT("Display"), CPF_Config);
+	new(GetClass(), TEXT("VRMirrorMode"), RF_Public) UByteProperty(CPP_PROPERTY(VRMirrorMode), TEXT("Display"), CPF_Config);
 	new(GetClass(), TEXT("GammaOffset"), RF_Public) UFloatProperty(CPP_PROPERTY(GammaOffset), TEXT("Display"), CPF_Config);
 	new(GetClass(), TEXT("GammaOffsetRed"), RF_Public) UFloatProperty(CPP_PROPERTY(GammaOffsetRed), TEXT("Display"), CPF_Config);
 	new(GetClass(), TEXT("GammaOffsetGreen"), RF_Public) UFloatProperty(CPP_PROPERTY(GammaOffsetGreen), TEXT("Display"), CPF_Config);
@@ -141,6 +172,26 @@ UBOOL UD3D11RenderDevice::Init(UViewport* InViewport, INT NewX, INT NewY, INT Ne
 	Viewport = InViewport;
 	ActiveHdr = Hdr;
 	BufferCount = UseVSync ? 2 : 3;
+
+	if (UseVR && !GIsEditor)
+	{
+		// Auto-detect: probe the OpenXR runtime now. Headset present -> run in VR;
+		// otherwise clean up and run normally (mono). No config toggling needed.
+		VR = CreateOpenXRBackend();
+		uint64_t xrLuid = 0;
+		if (VR && VR->QueryAdapterLuid(xrLuid))
+		{
+			// VR mode: size the scene buffers to hold a whole frame (mono streams
+			// through tiny ones for FPS; the two-eye replay needs the whole frame).
+			SceneVertexBufferCap = 1024 * 1024;
+			SceneIndexBufferCap = 3 * 1024 * 1024;
+		}
+		else if (VR)
+		{
+			delete VR; // no headset -> stay mono, normal buffers/performance
+			VR = nullptr;
+		}
+	}
 
 	HDC screenDC = GetDC(0);
 	DesktopResolution.Width = GetDeviceCaps(screenDC, HORZRES);
@@ -373,7 +424,39 @@ UBOOL UD3D11RenderDevice::Init(UViewport* InViewport, INT NewX, INT NewY, INT Ne
 		return 0;
 	}
 
+	StartVR(); // no-op unless the early probe found a headset
+
 	return 1;
+	unguard;
+}
+
+void UD3D11RenderDevice::StartVR()
+{
+	guard(UD3D11RenderDevice::StartVR);
+
+	if (!VR) // no headset detected in the Init probe -> mono
+		return;
+
+	// ponytail: M0 assumes the default adapter is the one XR wants (true on single-GPU).
+	// Multi-GPU: create the device on the probed LUID instead.
+	if (!VR->Start(Device, VRResScale))
+	{
+		debugf(TEXT("D3D11Drv VR: session start failed, falling back to mono"));
+		VR->Stop();
+		delete VR;
+		VR = nullptr;
+		return;
+	}
+
+	// Depth test disabled, for the HUD range (painter's order, no z-fight).
+	D3D11_DEPTH_STENCIL_DESC dsd = {};
+	dsd.DepthEnable = FALSE;
+	dsd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+	dsd.DepthFunc = D3D11_COMPARISON_ALWAYS;
+	Device->CreateDepthStencilState(&dsd, VRNoDepthState.TypedInitPtr());
+
+	debugf(TEXT("D3D11Drv VR: active"));
+
 	unguard;
 }
 
@@ -666,6 +749,13 @@ void UD3D11RenderDevice::Exit()
 
 	debugf(TEXT("D3D11Drv: exit called"));
 
+	if (VR)
+	{
+		VR->Stop();
+		delete VR;
+		VR = nullptr;
+	}
+
 	UnmapVertices();
 
 	ReleaseSwapChainResources();
@@ -721,6 +811,7 @@ void UD3D11RenderDevice::ResizeSceneBuffers(int width, int height, int multisamp
 	SceneBuffers.HitBufferShaderView.reset();
 	SceneBuffers.PPHitBufferView.reset();
 	SceneBuffers.DepthBufferView.reset();
+	SceneBuffers.MirrorDepthBufferView.reset();
 	for (int i = 0; i < 2; i++)
 	{
 		SceneBuffers.PPImageShaderView[i].reset();
@@ -732,6 +823,7 @@ void UD3D11RenderDevice::ResizeSceneBuffers(int width, int height, int multisamp
 	SceneBuffers.PPHitBuffer.reset();
 	SceneBuffers.HitBuffer.reset();
 	SceneBuffers.DepthBuffer.reset();
+	SceneBuffers.MirrorDepthBuffer.reset();
 
 	for (PPBlurLevel& level : SceneBuffers.BlurLevels)
 	{
@@ -818,6 +910,13 @@ void UD3D11RenderDevice::ResizeSceneBuffers(int width, int height, int multisamp
 	ThrowIfFailed(result, "CreateTexture2D(DepthBuffer) failed");
 	SetDebugName(SceneBuffers.DepthBuffer, "SceneBuffers.DepthBuffer");
 
+	// 1-sample depth for the VR mirror (rendered without MSAA straight into PPImage[0]).
+	texDesc.SampleDesc.Count = 1;
+	texDesc.SampleDesc.Quality = 0;
+	result = Device->CreateTexture2D(&texDesc, nullptr, SceneBuffers.MirrorDepthBuffer.TypedInitPtr());
+	ThrowIfFailed(result, "CreateTexture2D(MirrorDepthBuffer) failed");
+	SetDebugName(SceneBuffers.MirrorDepthBuffer, "SceneBuffers.MirrorDepthBuffer");
+
 	for (int i = 0; i < 2; i++)
 	{
 		texDesc = {};
@@ -854,6 +953,10 @@ void UD3D11RenderDevice::ResizeSceneBuffers(int width, int height, int multisamp
 	result = Device->CreateDepthStencilView(SceneBuffers.DepthBuffer, nullptr, SceneBuffers.DepthBufferView.TypedInitPtr());
 	ThrowIfFailed(result, "CreateDepthStencilView(DepthBuffer) failed");
 	SetDebugName(SceneBuffers.DepthBufferView, "SceneBuffers.DepthBufferView");
+
+	result = Device->CreateDepthStencilView(SceneBuffers.MirrorDepthBuffer, nullptr, SceneBuffers.MirrorDepthBufferView.TypedInitPtr());
+	ThrowIfFailed(result, "CreateDepthStencilView(MirrorDepthBuffer) failed");
+	SetDebugName(SceneBuffers.MirrorDepthBufferView, "SceneBuffers.MirrorDepthBufferView");
 
 	for (int i = 0; i < 2; i++)
 	{
@@ -1088,9 +1191,12 @@ void UD3D11RenderDevice::CreateScenePass()
 		}
 	}
 
+	// Allocate the actual buffers at the runtime cap (mono = the tuned const, VR =
+	// the larger cap). Must match what ReserveVertices bounds against, or writes
+	// run past the mapped buffer.
 	D3D11_BUFFER_DESC bufDesc = {};
 	bufDesc.Usage = D3D11_USAGE_DYNAMIC;
-	bufDesc.ByteWidth = SceneVertexBufferSize * sizeof(SceneVertex);
+	bufDesc.ByteWidth = SceneVertexBufferCap * sizeof(SceneVertex);
 	bufDesc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
 	bufDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
 	HRESULT result = Device->CreateBuffer(&bufDesc, nullptr, ScenePass.VertexBuffer.TypedInitPtr());
@@ -1099,7 +1205,7 @@ void UD3D11RenderDevice::CreateScenePass()
 
 	bufDesc = {};
 	bufDesc.Usage = D3D11_USAGE_DYNAMIC;
-	bufDesc.ByteWidth = SceneIndexBufferSize * sizeof(uint32_t);
+	bufDesc.ByteWidth = SceneIndexBufferCap * sizeof(uint32_t);
 	bufDesc.BindFlags = D3D11_BIND_INDEX_BUFFER;
 	bufDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
 	result = Device->CreateBuffer(&bufDesc, nullptr, ScenePass.IndexBuffer.TypedInitPtr());
@@ -1220,6 +1326,7 @@ void UD3D11RenderDevice::ReleaseSceneBuffers()
 	SceneBuffers.HitBufferShaderView.reset();
 	SceneBuffers.PPHitBufferView.reset();
 	SceneBuffers.DepthBufferView.reset();
+	SceneBuffers.MirrorDepthBufferView.reset();
 	for (int i = 0; i < 2; i++)
 	{
 		SceneBuffers.PPImageShaderView[i].reset();
@@ -1231,6 +1338,7 @@ void UD3D11RenderDevice::ReleaseSceneBuffers()
 	SceneBuffers.PPHitBuffer.reset();
 	SceneBuffers.HitBuffer.reset();
 	SceneBuffers.DepthBuffer.reset();
+	SceneBuffers.MirrorDepthBuffer.reset();
 	for (PPBlurLevel& level : SceneBuffers.BlurLevels)
 	{
 		level.VTexture.reset();
@@ -1589,6 +1697,13 @@ UBOOL UD3D11RenderDevice::Exec(const TCHAR* Cmd, FOutputDevice& Ar)
 {
 	guard(UD3D11RenderDevice::Exec);
 
+	if (ParseCommand(&Cmd, TEXT("VRRECENTER")))
+	{
+		// Bindable recenter: reset the head-look reference to the current head pose.
+		VRRecenterPending = true;
+		return 1;
+	}
+
 	if (ParseCommand(&Cmd, TEXT("DGL")))
 	{
 		if (ParseCommand(&Cmd, TEXT("BUFFERTRIS")))
@@ -1722,11 +1837,32 @@ void UD3D11RenderDevice::Lock(FPlane InFlashScale, FPlane InFlashFog, FPlane Scr
 		UpdateSwapChain();
 	}
 
-	if (CurrentSizeX && CurrentSizeY)
+	// VR frame start: pump the runtime, get eye poses, render the scene at eye
+	// resolution. BeginFrame is called unconditionally (it bootstraps the session
+	// via its event pump); it returns false until the session is rendering, in
+	// which case we just render mono to the desktop this frame.
+	VRShouldRender = false;
+	VRRetaining = false;
+	int sceneSizeX = CurrentSizeX;
+	int sceneSizeY = CurrentSizeY;
+	if (VR)
+	{
+		VRShouldRender = VR->BeginFrame(VREyes);
+		VRRetaining = VRShouldRender;
+		if (VRShouldRender)
+		{
+			uint32_t ew = 0, eh = 0;
+			VR->GetEyeResolution(ew, eh);
+			sceneSizeX = (int)ew;
+			sceneSizeY = (int)eh;
+		}
+	}
+
+	if (sceneSizeX && sceneSizeY)
 	{
 		try
 		{
-			ResizeSceneBuffers(CurrentSizeX, CurrentSizeY, GetSettingsMultisample());
+			ResizeSceneBuffers(sceneSizeX, sceneSizeY, GetSettingsMultisample());
 		}
 		catch (const std::exception& e)
 		{
@@ -1813,7 +1949,7 @@ void UD3D11RenderDevice::DrawStats(FSceneNode* Frame)
 	Stats.BuffersUsed = 1;
 }
 
-PresentPushConstants UD3D11RenderDevice::GetPresentPushConstants()
+PresentPushConstants UD3D11RenderDevice::GetPresentPushConstants(float brightnessScale, float brightnessOffset)
 {
 	PresentPushConstants pushconstants;
 	pushconstants.HdrScale = 0.8f + HdrScale * (3.0f / 255.0f);
@@ -1827,6 +1963,7 @@ PresentPushConstants UD3D11RenderDevice::GetPresentPushConstants()
 	else
 	{
 		float brightness = Clamp(Viewport->GetOuterUClient()->Brightness * 2.0, 0.05, 2.99);
+		brightness = Clamp(brightness * brightnessScale + brightnessOffset, 0.05f, 2.99f); // VR eye override (1,0 = unchanged)
 
 		if (GammaMode == 0)
 		{
@@ -1876,6 +2013,17 @@ void UD3D11RenderDevice::Unlock(UBOOL Blit)
 	if (!IsLocked) // Don't trust the engine.
 		return;
 
+	if (VRRetaining)
+	{
+		// Replay the accumulated frame into both eyes, submit, mirror to desktop.
+		RenderVREyes();
+		VRRetaining = false;
+		IsLocked = false;
+		if (VR)
+			VR->EndFrame(true);
+		return;
+	}
+
 	DrawBatches();
 	UnmapVertices();
 
@@ -1883,7 +2031,13 @@ void UD3D11RenderDevice::Unlock(UBOOL Blit)
 	SceneVertexPos = 0;
 	SceneIndexPos = 0;
 
-	if (Blit)
+	// This path also runs for VR when the headset is off (shouldRender=false -> mono frame).
+	// Close the begun OpenXR frame (EndFrame no-ops if none was begun), and only present to
+	// the desktop per VRMirrorMode. Non-VR (VR==null) always presents.
+	if (VR)
+		VR->EndFrame(false);
+
+	if (Blit && (!VR || VRWantMirror()))
 	{
 		if (SceneBuffers.Multisample > 1)
 		{
@@ -2042,6 +2196,11 @@ void UD3D11RenderDevice::Unlock(UBOOL Blit)
 
 	Context->OMSetRenderTargets(0, nullptr, nullptr);
 
+	// VR frame that the compositor told us to skip: still must close the frame.
+	// No-op when VR is off or no frame was begun.
+	if (VR)
+		VR->EndFrame(VRShouldRender);
+
 	HitQueryStack.clear();
 	HitQueries.clear();
 	HitBuffer.clear();
@@ -2131,6 +2290,12 @@ void UD3D11RenderDevice::UpdateTextureRect(FTextureInfo& Info, INT U, INT V, INT
 void UD3D11RenderDevice::DrawComplexSurface(FSceneNode* Frame, FSurfaceInfo& Surface, FSurfaceFacet& Facet)
 {
 	guardSlow(UD3D11RenderDevice::DrawComplexSurface);
+
+	if (VRRetaining)
+	{
+		VRSetProj(VRIsSkyFrame(Frame) ? VRPROJ_SKY : VRPROJ_WORLD);
+		VRBeginPostRender();
+	}
 
 	Timers.DrawComplexSurface.Clock();
 	ActiveTimer = &Timers.DrawComplexSurface;
@@ -2398,6 +2563,12 @@ void UD3D11RenderDevice::DrawGouraudPolygon(FSceneNode* Frame, FTextureInfo& Inf
 
 	if (NumPts < 3) return; // This can apparently happen!!
 
+	if (VRRetaining)
+	{
+		VRSetProj((GUglyHackFlags & HACKFLAGS_NoNearZ) ? VRPROJ_WEAPON : VRIsSkyFrame(Frame) ? VRPROJ_SKY : VRPROJ_WORLD);
+		VRBeginPostRender();
+	}
+
 	Timers.DrawGouraudPolygon.Clock();
 	ActiveTimer = &Timers.DrawGouraudPolygon;
 
@@ -2557,6 +2728,12 @@ static void EnviroMap(const FSceneNode* Frame, FTransTexture& P, FLOAT UScale, F
 void UD3D11RenderDevice::DrawGouraudTriangles(const FSceneNode* Frame, const FTextureInfo& Info, FTransTexture* const InPts, INT NumPts, DWORD PolyFlags, DWORD DataFlags, FSpanBuffer* Span)
 {
 	guardSlow(UD3D11RenderDevice::DrawGouraudTriangles);
+
+	if (VRRetaining)
+	{
+		VRSetProj((GUglyHackFlags & HACKFLAGS_NoNearZ) ? VRPROJ_WEAPON : VRIsSkyFrame(Frame) ? VRPROJ_SKY : VRPROJ_WORLD);
+		VRBeginPostRender();
+	}
 
 	FTransTexture* Pts = InPts;
 	constexpr INT SceneLimit = (SceneIndexBufferSize/3)*3 + 2;
@@ -2766,6 +2943,13 @@ void UD3D11RenderDevice::DrawTileList(const FSceneNode* Frame, const FTextureInf
 	Timers.DrawTile.Clock();
 	ActiveTimer = &Timers.DrawTile;
 
+	// Tile lists are HUD text/bars, never the crosshair; NoNearZ -> HUD overlay, else world.
+	if (VRRetaining)
+	{
+		VRSetProj((GUglyHackFlags & HACKFLAGS_NoNearZ) ? VRPROJ_HUDOVERLAY : VRPROJ_WORLD);
+		VRBeginPostRender();
+	}
+
 	// stijn: fix for invisible actor icons in ortho viewports
 	if (GIsEditor && Frame->Viewport->Actor && (Frame->Viewport->IsOrtho() || Abs(Z) <= SMALL_NUMBER))
 	{
@@ -2797,8 +2981,27 @@ void UD3D11RenderDevice::DrawTileList(const FSceneNode* Frame, const FTextureInf
 	}
 	a = 1.0f;
 
+	// VR: push only true HUD tiles (drawn at the near Z~1) to the convergence
+	// depth. Sprites/effects come through DrawTile too but at their real world Z —
+	// leave those alone or they'd sit at HUD distance and misalign with the world.
+	// Flat HUD (Z~1) -> convergence depth (PostRender start, depth clear and the screen
+	// frame are handled by VRBeginPostRender above). Gameplay HUD vs free-mouse UI depth.
+	bool vrHud = false;
+	if (VRRetaining && (GUglyHackFlags & HACKFLAGS_PostRender) && Abs(1.0f - Z) <= SMALL_NUMBER)
+	{
+		Z = (Viewport && !Viewport->bShowWindowsMouse) ? VRHudDepth : VRUIDepth;
+		vrHud = true;
+	}
+
 	float rfx2z = RFX2 * Z;
 	float rfy2z = RFY2 * Z;
+	// HUD scale: gameplay only (mouse captured) so menu/UI is untouched. Baked into the
+	// tile verts, so it currently affects the desktop mirror too (see VR_NOTES).
+	if (vrHud && Viewport && !Viewport->bShowWindowsMouse)
+	{
+		rfx2z *= VRHudScaleX;
+		rfy2z *= VRHudScaleY;
+	}
 
 	for (INT i = 0; i < NumTiles; i++)
 	{
@@ -2943,6 +3146,25 @@ void UD3D11RenderDevice::DrawTile(FSceneNode* Frame, FTextureInfo& Info, FLOAT X
 	Timers.DrawTile.Clock();
 	ActiveTimer = &Timers.DrawTile;
 
+	// Overlays (RenderOverlays: HACKFLAGS_NoNearZ) are drawn near, no near clip — a Z~1
+	// tile with full eye IPD is shoved off-screen (visible on the mono mirror only). These
+	// tiles are custom weapon crosshairs AND HUD (bars/ammo). Only the actual crosshair
+	// (center + small) converges at VRCrosshairDepth; off-centre HUD stays at VRHudDepth,
+	// else the weapon bar rides the aim point.
+	if (VRRetaining)
+	{
+		if (GUglyHackFlags & HACKFLAGS_NoNearZ)
+		{
+			// Centre = crosshair (no size test — sniper/vehicle reticles are huge); off-centre = HUD.
+			bool cross = Abs((X + XL * 0.5f) - Frame->FX2) < Frame->FX * 0.06f &&
+				Abs((Y + YL * 0.5f) - Frame->FY2) < Frame->FY * 0.06f;
+			VRSetProj(cross ? VRPROJ_CROSSHAIR : VRPROJ_HUDOVERLAY);
+		}
+		else
+			VRSetProj(VRPROJ_WORLD);
+		VRBeginPostRender();
+	}
+
 	// stijn: fix for invisible actor icons in ortho viewports
 	if (GIsEditor && Frame->Viewport->Actor && (Frame->Viewport->IsOrtho() || Abs(Z) <= SMALL_NUMBER))
 	{
@@ -2996,8 +3218,35 @@ void UD3D11RenderDevice::DrawTile(FSceneNode* Frame, FTextureInfo& Info, FLOAT X
 		}
 		a = 1.0f;
 
+		// Flat HUD (Z~1) -> convergence depth. Sprites (Z != 1) keep their real world Z.
+		// Gameplay: centre tiles (the crosshair) get their own depth; free mouse -> UI depth.
+		bool vrHud = false;
+		if (VRRetaining && (GUglyHackFlags & HACKFLAGS_PostRender) && Abs(1.0f - Z) <= SMALL_NUMBER)
+		{
+			if (Viewport && !Viewport->bShowWindowsMouse)
+			{
+				// Crosshair = a tile centred on screen. No size test: sniper scopes and
+				// vehicle reticles are huge. Off-centre HUD/text is rejected by position.
+				float cx = X + XL * 0.5f;
+				float cy = Y + YL * 0.5f;
+				bool centre =
+					Abs(cx - Frame->FX2) < Frame->FX * 0.06f && Abs(cy - Frame->FY2) < Frame->FY * 0.06f;
+				Z = centre ? VRCrosshairDepth : VRHudDepth;
+			}
+			else
+			{
+				Z = VRUIDepth;
+			}
+			vrHud = true;
+		}
+
 		float rfx2z = RFX2 * Z;
 		float rfy2z = RFY2 * Z;
+		if (vrHud && Viewport && !Viewport->bShowWindowsMouse) // gameplay only; menu/UI untouched
+		{
+			rfx2z *= VRHudScaleX;
+			rfy2z *= VRHudScaleY;
+		}
 		X -= Frame->FX2;
 		Y -= Frame->FY2;
 		XL += X;
@@ -3242,6 +3491,15 @@ void UD3D11RenderDevice::ClearZ(FSceneNode* Frame)
 {
 	guard(UD3D11RenderDevice::ClearZ);
 
+	if (VRRetaining)
+	{
+		// Retain mode draws nothing yet; record the boundary so the eye/mirror replay
+		// clears depth here (e.g. after the skybox, so the world draws over it).
+		AddDrawBatch();
+		VRClearZAt.push_back(QueuedBatches.size());
+		return;
+	}
+
 	DrawBatches();
 
 	Context->ClearDepthStencilView(SceneBuffers.DepthBufferView, D3D11_CLEAR_DEPTH, 1.0f, 0);
@@ -3378,6 +3636,8 @@ void UD3D11RenderDevice::EndFlash()
 		SceneConstants.NearClip = vec4(0.0f, 0.0f, 0.0f, 1.0f);
 		Context->UpdateSubresource(ScenePass.ConstantBuffer, 0, nullptr, &SceneConstants, 0, 0);
 
+		VRSetProj(VRPROJ_FLASH); // VR: the quad is already in clip space -> replay with identity, not an eye frustum
+
 		SetPipeline(PF_Highlighted);
 		SetDescriptorSet(0);
 
@@ -3402,6 +3662,8 @@ void UD3D11RenderDevice::EndFlash()
 
 			UseVertices(4, 6);
 		}
+
+		VRSetProj(VRPROJ_WORLD); // close/isolate the flash batch, restore default tag
 
 		DrawBatches();
 		if (CurrentFrame)
@@ -3457,14 +3719,55 @@ void UD3D11RenderDevice::AddDrawBatch()
 	if (Batch.SceneIndexStart != SceneIndexPos)
 	{
 		Batch.SceneIndexEnd = SceneIndexPos;
+		Batch.VRProj = VRCurProj;
 		QueuedBatches.push_back(Batch);
 		Batch.SceneIndexStart = SceneIndexPos;
 	}
 }
 
+// Tag which eye projection a batch replays with (VRPROJ_*): world, first-person weapon
+// (reduced IPD), overlay crosshair / overlay HUD (crosshair vs HUD convergence). Forcing a
+// boundary on change keeps each batch on exactly one projection, so no fragile range
+// ordering is needed — the replay just groups adjacent same-tag batches.
+void UD3D11RenderDevice::VRSetProj(int proj)
+{
+	if (VRRetaining && proj != VRCurProj)
+	{
+		AddDrawBatch();
+		VRCurProj = proj;
+	}
+}
+
+// True when this frame renders a skybox zone (UE1 draws the SkyZone's geometry with the
+// frame set to that zone). Sky geometry must replay at zero IPD (infinity). Zones never
+// move, so the 64 flags are built once per level: for each zone, its SkyZone actor's zone
+// is a sky zone.
+bool UD3D11RenderDevice::VRIsSkyFrame(const FSceneNode* Frame)
+{
+	if (!VRRetaining || !Frame || !Frame->Level)
+		return false;
+	if (Frame->Level != VRSkyZonesLevel)
+	{
+		appMemzero(VRSkyZones, sizeof(VRSkyZones));
+		for (INT z = 0; z < 64; z++)
+		{
+			AZoneInfo* za = Frame->Level->GetZoneActor(z);
+			if (za && za->SkyZone)
+				VRSkyZones[za->SkyZone->Region.ZoneNumber & 63] = true;
+		}
+		VRSkyZonesLevel = Frame->Level;
+	}
+	return VRSkyZones[Frame->ZoneNumber & 63];
+}
+
 void UD3D11RenderDevice::DrawBatches(bool nextBuffer)
 {
 	AddDrawBatch();
+
+	// VR retain: accumulate the whole frame into QueuedBatches; the actual
+	// rasterisation happens once per eye in RenderVREyes() at Unlock.
+	if (VRRetaining)
+		return;
 
 	if (ActiveTimer)
 		ActiveTimer->Unclock();
@@ -3492,7 +3795,7 @@ void UD3D11RenderDevice::DrawBatches(bool nextBuffer)
 		ActiveTimer->Clock();
 }
 
-void UD3D11RenderDevice::DrawEntry(const DrawBatchEntry& entry)
+void UD3D11RenderDevice::DrawEntry(const DrawBatchEntry& entry, bool forceNoDepth)
 {
 	size_t icount = entry.SceneIndexEnd - entry.SceneIndexStart;
 
@@ -3524,12 +3827,620 @@ void UD3D11RenderDevice::DrawEntry(const DrawBatchEntry& entry)
 	Context->PSSetShader(entry.Pipeline->PixelShader, nullptr, 0);
 
 	Context->OMSetBlendState(entry.Pipeline->BlendState, nullptr, 0xffffffff);
-	Context->OMSetDepthStencilState(entry.Pipeline->DepthStencilState, 0);
+	// HUD range draws with depth test off (painter's order) so coplanar HUD tiles
+	// (console background + text) don't z-fight.
+	Context->OMSetDepthStencilState(forceNoDepth ? VRNoDepthState.get() : entry.Pipeline->DepthStencilState.get(), 0);
 
 	Context->IASetPrimitiveTopology(entry.Pipeline->PrimitiveTopology);
 
 	Context->DrawIndexed(icount, entry.SceneIndexStart, 0);
 	Stats.DrawCalls++;
+}
+
+// Resolve + tonemap the current ColorBuffer into an arbitrary render target.
+// Same operations as the mono Unlock present block, but retargetable so VR can
+// present into each eye's swapchain image and into the desktop mirror.
+// ponytail: sRGB eye target may double-apply the shader gamma — known M0 tuning
+// item (VR_NOTES.md); wire a no-gamma present variant if the image looks washed.
+void UD3D11RenderDevice::RunPresentPass(ID3D11RenderTargetView* output, UINT width, UINT height, float brightnessScale, float brightnessOffset, bool bloom, bool alreadyResolved)
+{
+	// alreadyResolved: the VR mirror renders straight into PPImage[0] at 1 sample, so there's
+	// nothing to resolve/copy and no AA cost. Eyes resolve the MSAA ColorBuffer as usual.
+	if (!alreadyResolved)
+	{
+		if (SceneBuffers.Multisample > 1)
+			Context->ResolveSubresource(SceneBuffers.PPImage[0], 0, SceneBuffers.ColorBuffer, 0, DXGI_FORMAT_R16G16B16A16_FLOAT);
+		else
+			Context->CopyResource(SceneBuffers.PPImage[0], SceneBuffers.ColorBuffer);
+	}
+
+	if (bloom && Bloom)
+		RunBloomPass();
+
+	ID3D11RenderTargetView* rtvs[1] = { output };
+	Context->OMSetRenderTargets(1, rtvs, nullptr);
+
+	D3D11_VIEWPORT viewport = {};
+	viewport.Width = (float)width;
+	viewport.Height = (float)height;
+	viewport.MaxDepth = 1.0f;
+	Context->RSSetViewports(1, &viewport);
+
+	PresentPushConstants pushconstants = GetPresentPushConstants(brightnessScale, brightnessOffset);
+
+	int presentShader = 0;
+	if (ActiveHdr) presentShader |= 1;
+	if (GammaMode == 1) presentShader |= 2;
+	if (pushconstants.Brightness != 0.0f || pushconstants.Contrast != 1.0f || pushconstants.Saturation != 1.0f) presentShader |= (Clamp(GrayFormula, 0, 2) + 1) << 2;
+
+	UINT stride = sizeof(vec2);
+	UINT offset = 0;
+	ID3D11Buffer* vertexBuffers[1] = { PresentPass.PPStepVertexBuffer.get() };
+	ID3D11ShaderResourceView* psResources[] = { SceneBuffers.PPImageShaderView[0], PresentPass.DitherTextureView };
+	ID3D11Buffer* cbs[1] = { PresentPass.PresentConstantBuffer.get() };
+	Context->IASetVertexBuffers(0, 1, vertexBuffers, &stride, &offset);
+	Context->IASetInputLayout(PresentPass.PPStepLayout);
+	Context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+	Context->VSSetShader(PresentPass.PPStep, nullptr, 0);
+	Context->RSSetState(PresentPass.RasterizerState);
+	Context->PSSetShader(PresentPass.Present[presentShader], nullptr, 0);
+	Context->PSSetConstantBuffers(0, 1, cbs);
+	Context->PSSetShaderResources(0, 2, psResources);
+	Context->OMSetDepthStencilState(PresentPass.DepthStencilState, 0);
+	Context->OMSetBlendState(PresentPass.BlendState, nullptr, 0xffffffff);
+	Context->UpdateSubresource(PresentPass.PresentConstantBuffer, 0, nullptr, &pushconstants, 0, 0);
+	Context->Draw(6, 0);
+}
+
+// Replay the accumulated frame into ColorBuffer with a given projection. Shared
+// by each eye and by the flat desktop pass — the geometry is identical, only the
+// projection and target size differ.
+// Quaternion helpers (x,y,z,w) for the VR head-look modes.
+static vec4 VRQuatConj(const vec4& q) { return vec4(-q.x, -q.y, -q.z, q.w); }
+static vec4 VRQuatMul(const vec4& a, const vec4& b)
+{
+	return vec4(
+		a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+		a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+		a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+		a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z);
+}
+
+// Bind ColorBuffer + scene geometry state for a replay pass (clear, RT, viewport,
+// vertex/index buffers). Call once per eye/mirror, then DrawSceneRange one or more times.
+void UD3D11RenderDevice::SetupSceneTarget(uint32_t width, uint32_t height)
+{
+	FLOAT clearColor[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+	ID3D11RenderTargetView* views[2] = { SceneBuffers.ColorBufferView, SceneBuffers.HitBufferView };
+	Context->ClearRenderTargetView(SceneBuffers.ColorBufferView, clearColor);
+	Context->ClearDepthStencilView(SceneBuffers.DepthBufferView, D3D11_CLEAR_DEPTH, 1.0f, 0);
+	Context->OMSetRenderTargets(2, views, SceneBuffers.DepthBufferView);
+	VRReplayDepth = SceneBuffers.DepthBufferView.get(); // depth the in-replay ClearZ points clear
+
+	SceneViewport = {};
+	SceneViewport.Width = (float)width;
+	SceneViewport.Height = (float)height;
+	SceneViewport.MinDepth = 0.1f;
+	SceneViewport.MaxDepth = 1.0f;
+	Context->RSSetViewports(1, &SceneViewport);
+
+	// Rebind scene geometry + state (a prior present pass changed IA/VS).
+	UINT stride = sizeof(SceneVertex);
+	UINT offset = 0;
+	ID3D11Buffer* vertexBuffers[1] = { ScenePass.VertexBuffer.get() };
+	ID3D11Buffer* cbs[1] = { ScenePass.ConstantBuffer.get() };
+	Context->IASetVertexBuffers(0, 1, vertexBuffers, &stride, &offset);
+	Context->IASetIndexBuffer(ScenePass.IndexBuffer, DXGI_FORMAT_R32_UINT, 0);
+	Context->IASetInputLayout(ScenePass.InputLayout);
+	Context->VSSetShader(ScenePass.VertexShader, nullptr, 0);
+	Context->VSSetConstantBuffers(0, 1, cbs);
+	Context->RSSetState(ScenePass.RasterizerState[SceneBuffers.Multisample > 1]);
+	D3D11_RECT scissor = {};
+	scissor.right = (LONG)width;
+	scissor.bottom = (LONG)height;
+	Context->RSSetScissorRects(1, &scissor);
+}
+
+// Like SetupSceneTarget but for the VR desktop mirror: render at 1 sample straight into
+// PPImage[0] with a 1-sample depth buffer (no MSAA, no resolve, no bloom later). Only the
+// colour target is bound (the hit buffer isn't needed for the mirror; the shader's second
+// output is simply discarded). Same geometry/state as the scene pass otherwise.
+void UD3D11RenderDevice::SetupSceneTargetMirror(uint32_t width, uint32_t height)
+{
+	// The previous eye present left PPImageShaderView[0] bound as a PS resource; we're about
+	// to bind PPImage[0] as the render target, so unbind it first (avoid a read/write hazard).
+	ID3D11ShaderResourceView* nullSRV[2] = { nullptr, nullptr };
+	Context->PSSetShaderResources(0, 2, nullSRV);
+
+	FLOAT clearColor[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+	Context->ClearRenderTargetView(SceneBuffers.PPImageView[0], clearColor);
+	Context->ClearDepthStencilView(SceneBuffers.MirrorDepthBufferView, D3D11_CLEAR_DEPTH, 1.0f, 0);
+	ID3D11RenderTargetView* views[1] = { SceneBuffers.PPImageView[0] };
+	Context->OMSetRenderTargets(1, views, SceneBuffers.MirrorDepthBufferView);
+	VRReplayDepth = SceneBuffers.MirrorDepthBufferView.get();
+
+	SceneViewport = {};
+	SceneViewport.Width = (float)width;
+	SceneViewport.Height = (float)height;
+	SceneViewport.MinDepth = 0.1f;
+	SceneViewport.MaxDepth = 1.0f;
+	Context->RSSetViewports(1, &SceneViewport);
+
+	UINT stride = sizeof(SceneVertex);
+	UINT offset = 0;
+	ID3D11Buffer* vertexBuffers[1] = { ScenePass.VertexBuffer.get() };
+	ID3D11Buffer* cbs[1] = { ScenePass.ConstantBuffer.get() };
+	Context->IASetVertexBuffers(0, 1, vertexBuffers, &stride, &offset);
+	Context->IASetIndexBuffer(ScenePass.IndexBuffer, DXGI_FORMAT_R32_UINT, 0);
+	Context->IASetInputLayout(ScenePass.InputLayout);
+	Context->VSSetShader(ScenePass.VertexShader, nullptr, 0);
+	Context->VSSetConstantBuffers(0, 1, cbs);
+	Context->RSSetState(ScenePass.RasterizerState[0]); // 1-sample -> non-MSAA rasterizer
+	D3D11_RECT scissor = {};
+	scissor.right = (LONG)width;
+	scissor.bottom = (LONG)height;
+	Context->RSSetScissorRects(1, &scissor);
+}
+
+// Replay [begin, end) but clear the depth buffer at each recorded VRClearZAt point inside
+// the range — reproduces the engine's mid-frame ClearZ (skybox draws first, then depth is
+// wiped so the world renders over it) and the HUD depth clear. VRClearZAt is in frame order.
+void UD3D11RenderDevice::DrawSceneWithClears(const mat4& objectToProjection, size_t begin, size_t end)
+{
+	SceneConstants.ObjectToProjection = objectToProjection;
+	SceneConstants.NearClip = vec4(0.0f, 0.0f, 0.0f, 1.0f); // no portal near-clip in VR
+	Context->UpdateSubresource(ScenePass.ConstantBuffer, 0, nullptr, &SceneConstants, 0, 0);
+
+	if (end > QueuedBatches.size())
+		end = QueuedBatches.size();
+	for (size_t i = begin; i < end; i++)
+	{
+		// Clear depth at each recorded point (engine ClearZ after skybox, and once
+		// when the HUD begins) so those layers aren't fought by earlier geometry.
+		for (size_t clearAt : VRClearZAt)
+			if (clearAt == i)
+				Context->ClearDepthStencilView(VRReplayDepth, D3D11_CLEAR_DEPTH, 1.0f, 0);
+		// HUD range: depth test off so coplanar HUD tiles don't z-fight.
+		bool noDepth = (VRHudStart >= 0 && i >= (size_t)VRHudStart);
+		DrawEntry(QueuedBatches[i], noDepth);
+	}
+}
+
+// Black border masking everything outside the game FOV. The eye FOV is wider than the
+// game FOV, so beyond-FOV geometry (skybox rocks etc.) flickers at the edges. 4 black
+// quads at the game-FOV edge (RProjZ) out to well past the eye edge; a central hole
+// leaves the game view (and the centred weapon) untouched. Drawn depth-off in the HUD
+// range with the world projection, so it rotates with the view. Far Z -> negligible IPD.
+// Zoom is handled automatically: verts scale with RProjZ, the projection magnifies by
+// zoom = default/RProjZ, so the border lands at the default FOV regardless of zoom.
+void UD3D11RenderDevice::InjectVRScreenFrame()
+{
+	const float Z = 1000.0f;
+	float xE = RProjZ * Z;
+	float yE = Aspect * RProjZ * Z;
+	float xB = xE * 4.0f;
+	float yB = yE * 4.0f;
+
+	SetPipeline(PF_Highlighted);
+	SetDescriptorSet(0);
+
+	auto alloc = ReserveVertices(16, 24);
+	if (!alloc.vptr)
+		return;
+	SceneVertex* v = alloc.vptr;
+	uint32_t* idx = alloc.iptr;
+	uint32_t b = alloc.vpos;
+	vec2 z2(0.0f);
+	vec4 black(0.0f, 0.0f, 0.0f, 1.0f);
+
+	const float qx0[4] = { -xB,  xE, -xE, -xE }; // left, right, top, bottom
+	const float qx1[4] = { -xE,  xB,  xE,  xE };
+	const float qy0[4] = { -yB, -yB,  yE, -yB };
+	const float qy1[4] = {  yB,  yB,  yB, -yE };
+	for (int q = 0; q < 4; q++)
+	{
+		v[q * 4 + 0] = { 0, vec3(qx0[q], qy0[q], Z), z2, z2, z2, z2, black };
+		v[q * 4 + 1] = { 0, vec3(qx1[q], qy0[q], Z), z2, z2, z2, z2, black };
+		v[q * 4 + 2] = { 0, vec3(qx1[q], qy1[q], Z), z2, z2, z2, z2, black };
+		v[q * 4 + 3] = { 0, vec3(qx0[q], qy1[q], Z), z2, z2, z2, z2, black };
+		idx[q * 6 + 0] = b + q * 4 + 0; idx[q * 6 + 1] = b + q * 4 + 1; idx[q * 6 + 2] = b + q * 4 + 2;
+		idx[q * 6 + 3] = b + q * 4 + 0; idx[q * 6 + 4] = b + q * 4 + 2; idx[q * 6 + 5] = b + q * 4 + 3;
+	}
+	UseVertices(16, 24);
+}
+
+// First PostRender draw of the frame: close the world, start the HUD range (drawn
+// depth-off), clear depth once so HUD sits over the world, and inject the screen frame
+// as the first HUD-range batch. Called before the tile's own SetPipeline, so the tile
+// pipeline that follows cleanly closes the frame batch.
+void UD3D11RenderDevice::VRBeginHudRange()
+{
+	AddDrawBatch();
+	VRHudStart = (int)QueuedBatches.size();
+	if (VRClearZBeforeHud)
+		VRClearZAt.push_back((size_t)VRHudStart);
+	InjectVRScreenFrame();
+}
+
+void UD3D11RenderDevice::VRBeginPostRender()
+{
+	if (VRRetaining && VRHudStart < 0 && (GUglyHackFlags & HACKFLAGS_PostRender))
+		VRBeginHudRange();
+}
+
+// Windowed VR: the OS hardware cursor isn't visible inside the HMD compositor. When the
+// engine is using it (bWindowsMouseAvailable) it draws no software cursor, so we draw the
+// real CURRENT UWindow cursor ourselves (Root.MouseWindow.Cursor.tex — arrow/resize/hand,
+// changes with context; same texture WindowConsole.DrawMouse would draw), positioned at
+// mouse - hotspot exactly like DrawMouse. Injected after the scene batches so it lands in
+// the eyes only — the desktop mirror already shows the OS cursor. We only READ engine flags,
+// never change them (changing bWindowsMouseAvailable switches the mouse-input mode and
+// strands the cursor).
+void UD3D11RenderDevice::DrawVRCursor()
+{
+	if (CurrentFullscreen || !CurrentFrame || !Viewport || !Viewport->Console)
+		return;
+	if (!Viewport->bShowWindowsMouse)
+		return;
+
+	if (!Viewport->bWindowsMouseAvailable)
+		return;
+
+	// Resolve the cursor property offsets once per console class (FindField is a string search;
+	// the classes never unload mid-game). MouseWindow.Cursor is a WindowCursor STRUCT, so tex/
+	// HotX/HotY offsets are relative to the struct base. Commit the cache only on full success.
+	if (!VRCursor.TexProp || VRCursor.ConsoleClass != Viewport->Console->GetClass())
+	{
+		VRCursorRefl c;
+		c.ConsoleClass = Viewport->Console->GetClass();
+		c.RootProp = FindField<UObjectProperty>(c.ConsoleClass, TEXT("Root"));
+		UObject* Root = c.RootProp ? *(UObject**)((BYTE*)Viewport->Console + c.RootProp->Offset) : NULL;
+		c.MouseWindowProp = Root ? FindField<UObjectProperty>(Root->GetClass(), TEXT("MouseWindow")) : NULL;
+		UObject* MW = c.MouseWindowProp ? *(UObject**)((BYTE*)Root + c.MouseWindowProp->Offset) : NULL;
+		c.CursorProp = MW ? FindField<UStructProperty>(MW->GetClass(), TEXT("Cursor")) : NULL;
+		if (c.CursorProp)
+		{
+			c.TexProp = FindField<UObjectProperty>(c.CursorProp->Struct, TEXT("tex"));
+			c.HotXProp = FindField<UIntProperty>(c.CursorProp->Struct, TEXT("HotX"));
+			c.HotYProp = FindField<UIntProperty>(c.CursorProp->Struct, TEXT("HotY"));
+			if (c.TexProp)
+				VRCursor = c;
+		}
+	}
+	if (!VRCursor.TexProp)
+		return;
+
+	// Fast path: cached offsets only, no search. tex/HotX/HotY re-read each frame (cursor changes).
+	UObject* Root = *(UObject**)((BYTE*)Viewport->Console + VRCursor.RootProp->Offset);
+	UObject* MW = Root ? *(UObject**)((BYTE*)Root + VRCursor.MouseWindowProp->Offset) : NULL;
+	if (!MW)
+		return;
+	BYTE* base = (BYTE*)MW + VRCursor.CursorProp->Offset;
+	UTexture* Tex = Cast<UTexture>(*(UObject**)(base + VRCursor.TexProp->Offset));
+	if (!Tex)
+		return;
+
+	float mx = (float)Viewport->WindowsMouseX - (float)(VRCursor.HotXProp ? *(INT*)(base + VRCursor.HotXProp->Offset) : 0);
+	float my = (float)Viewport->WindowsMouseY - (float)(VRCursor.HotYProp ? *(INT*)(base + VRCursor.HotYProp->Offset) : 0);
+
+	FTextureInfo TexInfo;
+	Tex->Lock(TexInfo, Viewport->CurrentTime, -1, this);
+	CachedTexture* ctex = Textures->GetTexture(&TexInfo, true); // cursors are masked
+	float w = (float)TexInfo.USize;
+	float h = (float)TexInfo.VSize;
+
+	// Near depth range so the cursor sits on top regardless of its UI-depth stereo Z (same
+	// trick as the FP weapon). WORLD projection so it converges at that Z.
+	VRCurProj = VRPROJ_WORLD;
+	VRCursorPipeline = *GetPipeline(PF_Masked);
+	VRCursorPipeline.MinDepth = 0.0f;
+	VRCursorPipeline.MaxDepth = 0.05f;
+	SetPipeline(&VRCursorPipeline);
+	SetDescriptorSet(PF_Masked, ctex, 1);
+
+	auto alloc = ReserveVertices(4, 6);
+	if (alloc.vptr)
+	{
+		SceneVertex* vptr = alloc.vptr;
+		uint32_t* iptr = alloc.iptr;
+		uint32_t vpos = alloc.vpos;
+
+		float Z = VRUIDepth;
+		float rfx2z = RFX2 * Z;
+		float rfy2z = RFY2 * Z;
+		float X = mx - CurrentFrame->FX2;
+		float Y = my - CurrentFrame->FY2;
+		float XL = X + w;
+		float YL = Y + h;
+		float U = 0.0f, V = 0.0f;
+		float UL = w * ctex->UMult;
+		float VL = h * ctex->VMult;
+		vec2 z2(0.0f);
+		vec4 col(1.0f, 1.0f, 1.0f, 1.0f);
+
+		vptr[0] = { 0, vec3(rfx2z * X,  rfy2z * Y,  Z), vec2(U,  V),  z2, z2, z2, col };
+		vptr[1] = { 0, vec3(rfx2z * XL, rfy2z * Y,  Z), vec2(UL, V),  z2, z2, z2, col };
+		vptr[2] = { 0, vec3(rfx2z * XL, rfy2z * YL, Z), vec2(UL, VL), z2, z2, z2, col };
+		vptr[3] = { 0, vec3(rfx2z * X,  rfy2z * YL, Z), vec2(U,  VL), z2, z2, z2, col };
+
+		iptr[0] = vpos;
+		iptr[1] = vpos + 1;
+		iptr[2] = vpos + 2;
+		iptr[3] = vpos;
+		iptr[4] = vpos + 2;
+		iptr[5] = vpos + 3;
+		UseVertices(4, 6);
+	}
+	Tex->Unlock(TexInfo);
+}
+
+// Rasterise the frame accumulated in QueuedBatches once per eye (view-space
+// geometry is identical for both eyes; only the projection differs), present
+// each eye into its OpenXR swapchain image, then render a FLAT mono view for the
+// desktop mirror so on-screen text is readable and mouse hit-testing lines up.
+// Should the flat desktop mirror render this frame? VRMirrorMode: 0=off, 1=only when the
+// headset is removed (default), 2=also in menu (mouse free), 3=always. The headset-worn poll
+// (VR->IsWorn(), which combines session focus + user presence) is throttled to ~once a second
+// so these checks never cost per-frame — the mirror decision itself is a couple of bools.
+bool UD3D11RenderDevice::VRWantMirror()
+{
+	if (VRMirrorMode == 0)
+		return false;
+	if (VRMirrorMode >= 3)
+		return true;
+
+	if (VR)
+	{
+		DOUBLE now = appSecondsNew();
+		if (now - VRWornCheck > 1.0)
+		{
+			VRWorn = VR->IsWorn();
+			VRWornCheck = now;
+		}
+	}
+	bool menu = Viewport && Viewport->bShowWindowsMouse;
+	// 1 = removed only; 2 = removed or in menu.
+	return !VRWorn || (VRMirrorMode == 2 && menu);
+}
+
+void UD3D11RenderDevice::RenderVREyes()
+{
+	guard(UD3D11RenderDevice::RenderVREyes);
+
+	// Report a full VR vertex buffer (primitives silently dropped), throttled to ~once per
+	// 2s so a consistently heavy scene doesn't spam the log every frame.
+	if (VRDropped > 0)
+	{
+		DOUBLE now = appSecondsNew();
+		if (now - VRLastDropLog > 2.0)
+		{
+			debugf(TEXT("D3D11Drv VR: scene exceeded the VR vertex buffer, dropped %d primitives since last report (raise cap or lower detail)"), VRDropped);
+			VRLastDropLog = now;
+			VRDropped = 0;
+		}
+	}
+
+	AddDrawBatch();                          // flush the frame's tail batch
+	size_t sceneBatches = QueuedBatches.size();
+	DrawVRCursor();                          // real UWindow cursor, eyes only (mirror keeps the OS cursor)
+	AddDrawBatch();                          // close the cursor batch
+	UnmapVertices();                         // can't draw from a mapped dynamic buffer
+
+	uint32_t ew = 0, eh = 0;
+	VR->GetEyeResolution(ew, eh);
+	float scale = VRWorldScale;
+
+	// Weapon zoom (sniper etc.): the game shrinks FovAngle to magnify. We keep the
+	// fixed XR eye FOV, so reproduce the magnification by scaling the eye projection
+	// by tan(DefaultFOV/2)/tan(FovAngle/2). RProjZ already = tan(FovAngle/2) (SetSceneNode).
+	// Scaling clip.xy also cancels the FOV-driven narrowing of HUD tiles (RFX2), so the
+	// HUD stays put — same net behaviour as the mono desktop mirror.
+	float defFov = 90.0f;
+	if (Viewport && Viewport->Actor && Viewport->Actor->DefaultFOV > 1.0f)
+		defFov = Viewport->Actor->DefaultFOV;
+	float rprojDefault = (float)appTan(radians(defFov) * 0.5);
+	float zoom = (RProjZ > 0.0001f) ? (rprojDefault / RProjZ) : 1.0f;
+	if (zoom < 1.0f)
+		zoom = 1.0f;
+
+	// Head-look. The whole rendered frame is a virtual screen; rotate it by the head
+	// orientation. Recenter reference on console request or when leaving a menu.
+	bool menuUp = Viewport && Viewport->bShowWindowsMouse;
+	float hq[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+	VR->GetHeadOrientation(hq);
+	vec4 headNow(hq[0], hq[1], hq[2], hq[3]);
+	if (VRRecenterPending || (VRWasMenu && !menuUp))
+	{
+		VRHeadRef = headNow;
+		VRRecenterPending = false;
+	}
+	VRWasMenu = menuUp;
+
+	mat4 lookInv = mat4::identity();
+	if (VRLookMode == 0)
+	{
+		// Delta from the reference. Convert XR (right-handed, +y up, -z fwd) to the
+		// renderer's view space (left-handed, +y down, +z fwd) = a 180-degree rotation
+		// about X, which maps the quaternion (x,y,z,w) -> (x,-y,-z,w).
+		vec4 dq = VRQuatMul(headNow, VRQuatConj(VRHeadRef));
+		mat4 headRot = mat4::quaternion(dq.x, -dq.y, -dq.z, dq.w);
+
+		if (menuUp)
+		{
+			// Menu: full head orientation, so corner UI can be looked at.
+			lookInv = mat4::transpose(headRot);
+		}
+		else
+		{
+			// Gameplay: roll only (head tilt) — never reveals unrendered edges. Measure
+			// roll as the lean of the reference up-axis within the head's right/up basis
+			// (right.y vs up.y). This isolates roll from pitch and yaw for |pitch|<90.
+			// Near pitch +-90 both terms are cos(pitch)*{sin,cos}(roll) -> 0: roll is
+			// ambiguous (gimbal lock) and flips by pi through the pole, so head-yaw there
+			// leaks into a sudden weapon roll/disparity jump. mag = |cos(pitch)|; fade the
+			// roll out over the last ~15 degrees to vertical so it can't jump or flip.
+			float rightY = headRot[1];
+			float upY = headRot[5];
+			float roll = atan2f(rightY, upY);
+			float rollWeight = Clamp(sqrtf(rightY * rightY + upY * upY) / 0.25f, 0.0f, 1.0f);
+			lookInv = mat4::rotate(-roll * rollWeight, 0.0f, 0.0f, 1.0f);
+		}
+	}
+
+	for (int eye = 0; eye < 2; eye++)
+	{
+		// Points arrive in the mono camera's view space; translating by the eye
+		// offset lays the camera on that eye, then the asymmetric eye frustum projects.
+		// Divide the offset by zoom: the projection below magnifies clip.xy by zoom,
+		// which would also magnify the inter-eye disparity (eyes diverge/cross). Pre-
+		// dividing keeps the net screen disparity the same as unzoomed.
+		vec3 off = VREyes[eye].ViewOffset;
+		float invZoom = 1.0f / zoom;
+		mat4 eyeView = mat4::translate(-off.x * scale * invZoom, -off.y * scale * invZoom, off.z * scale);
+
+		mat4 eyeProj = VREyes[eye].Projection;
+
+		// Zoom: narrow the frustum symmetrically about the eye's forward axis by scaling
+		// only the view.x/view.y terms (m[0], m[5]). Do NOT scale the frustum skew
+		// (m[8], m[9]) — the XR eye frusta are asymmetric and scaling the skew amplifies
+		// each eye's off-centre projection, diverging the eyes.
+		if (zoom != 1.0f)
+		{
+			eyeProj[0] *= zoom;
+			eyeProj[5] *= zoom;
+		}
+
+		// Comfort vertical shift: a UNIFORM (depth-independent) pan of the whole eye
+		// image so world/HUD/crosshair move together — the crosshair keeps marking the
+		// true aim point. clip.y += panY*clip.w  =>  NDC.y += panY for every vertex.
+		// Fixed scale (NOT /VRHudDepth) so VRHudDepth only controls HUD depth/convergence.
+		float panY = -VRHeightOffset / 150.0f;
+		eyeProj[1]  += panY * eyeProj[3];
+		eyeProj[5]  += panY * eyeProj[7];
+		eyeProj[9]  += panY * eyeProj[11];
+		eyeProj[13] += panY * eyeProj[15];
+
+		// Head-look rotates the whole virtual screen (world, sky and HUD together).
+		mat4 worldProj = eyeProj * eyeView * lookInv;
+		mat4 skyProj = eyeProj * lookInv;
+		// Weapon: reduced IPD so the first-person weapon doesn't sit in your nose.
+		// The 0.1 factor keeps the config in a friendly range (1.0 ~= 10% IPD).
+		float weaponIpd = scale * invZoom * VRWeaponIPDScale * 0.1f;
+		mat4 weaponView = mat4::translate(-off.x * weaponIpd, -off.y * weaponIpd, off.z * scale);
+		mat4 weaponProj = eyeProj * weaponView * lookInv;
+		// Overlay tiles stay at Z~1 (near, on top) but converge at a chosen depth: the IPD a
+		// real object at that depth would have, so disparity ~= off*scale/depth. The crosshair
+		// converges at VRCrosshairDepth, off-centre HUD (bars/ammo) at VRHudDepth.
+		float overlayIpd = scale * invZoom / Max(VRCrosshairDepth, 1.0f);
+		mat4 overlayView = mat4::translate(-off.x * overlayIpd, -off.y * overlayIpd, off.z * scale);
+		mat4 overlayProj = eyeProj * overlayView * lookInv;
+		float hudOverlayIpd = scale * invZoom / Max(VRHudDepth, 1.0f);
+		mat4 hudOverlayView = mat4::translate(-off.x * hudOverlayIpd, -off.y * hudOverlayIpd, off.z * scale);
+		mat4 hudOverlayProj = eyeProj * hudOverlayView * lookInv;
+
+		SetupSceneTarget(ew, eh);
+		size_t total = QueuedBatches.size();
+		// Group adjacent batches by their per-batch projection tag (VRPROJ_*) and replay each
+		// group with its own eye projection: sky at zero IPD (infinity), weapon/overlay at
+		// reduced/convergence IPD, flash as a clip-space full-screen quad (identity), world
+		// normal. No range ordering to get wrong — the tags are set per batch on accumulation.
+		mat4 flashProj = mat4::identity();
+		for (size_t j = 0; j < total; )
+		{
+			int pt = QueuedBatches[j].VRProj;
+			size_t k = j;
+			while (k < total && QueuedBatches[k].VRProj == pt)
+				k++;
+			const mat4& proj =
+				(pt == VRPROJ_SKY) ? skyProj :
+				(pt == VRPROJ_WEAPON) ? weaponProj :
+				(pt == VRPROJ_CROSSHAIR) ? overlayProj :
+				(pt == VRPROJ_HUDOVERLAY) ? hudOverlayProj :
+				(pt == VRPROJ_FLASH) ? flashProj : worldProj;
+			DrawSceneWithClears(proj, j, k);
+			j = k;
+		}
+
+		ID3D11Texture2D* image = VR->BeginEye(eye);
+		if (image)
+		{
+			// Explicit view format: OpenXR runtimes often hand back a TYPELESS
+			// swapchain texture, and CreateRenderTargetView(nullptr) can't infer
+			// a format from that — which would leave the eye image unrendered (black).
+			// UNORM (not _SRGB): the present shader already gamma-encodes (same as the plain
+			// UNORM desktop backbuffer). An _SRGB view would encode a SECOND time -> overbright.
+			D3D11_RENDER_TARGET_VIEW_DESC rtvDesc = {};
+			rtvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+			rtvDesc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+			ComPtr<ID3D11RenderTargetView> rtv;
+			HRESULT hr = Device->CreateRenderTargetView(image, &rtvDesc, rtv.TypedInitPtr());
+			if (SUCCEEDED(hr))
+				RunPresentPass(rtv, ew, eh, VRBrightnessScale, VRBrightnessOffset); // HMD brightness override
+			else
+				debugf(TEXT("D3D11Drv VR: CreateRenderTargetView(eye) failed 0x%08x"), (unsigned)hr);
+			VR->EndEye(eye);
+		}
+	}
+
+	// Flat desktop mirror: replay once more with the plain mono projection (the same frustum
+	// SetSceneNode builds), so the on-screen view matches the engine's 2D menu/mouse layout —
+	// a stereo eye view would be distorted and desync clicks. Skipped per VRMirrorMode (e.g.
+	// when the headset is worn) to save a whole replay + present.
+	bool mirror = VRWantMirror();
+	if (CurrentFrame && mirror)
+	{
+		float rprojz = (float)appTan(radians(Viewport->Actor->FovAngle) * 0.5);
+		float aspect = CurrentFrame->FY / CurrentFrame->FX;
+		mat4 monoProj = mat4::frustum(-rprojz, rprojz, -aspect * rprojz, aspect * rprojz, 1.0f, 32768.0f, handedness::left, clipzrange::zero_positive_w);
+		mat4 flashProj = mat4::identity();
+		SetupSceneTargetMirror(ew, eh); // 1-sample into PPImage[0]: no MSAA, no resolve, no bloom
+		// Mirror: all scene batches (no cursor) with the plain mono projection, except the
+		// flash quad which is already clip-space (identity), same depth clears.
+		for (size_t j = 0; j < sceneBatches; )
+		{
+			int pt = QueuedBatches[j].VRProj;
+			size_t k = j;
+			while (k < sceneBatches && QueuedBatches[k].VRProj == pt)
+				k++;
+			DrawSceneWithClears((pt == VRPROJ_FLASH) ? flashProj : monoProj, j, k);
+			j = k;
+		}
+	}
+
+	// Reset the scissor to the full window (ReplaySceneToColorBuffer left it eye-sized)
+	// so the present fills the whole window and aligns with mouse coordinates.
+	D3D11_RECT fullWindow = {};
+	fullWindow.right = CurrentSizeX;
+	fullWindow.bottom = CurrentSizeY;
+	Context->RSSetScissorRects(1, &fullWindow);
+
+	// Present the mirror to the desktop (only if we rendered it). Without vsync — the HMD's
+	// xrWaitFrame is the frame-pacing authority; blocking on the monitor vsync too would fight
+	// it. Mirror is already in PPImage[0] at 1 sample (alreadyResolved) and skips bloom.
+	if (mirror)
+	{
+		RunPresentPass(BackBufferView, CurrentSizeX, CurrentSizeY, 1.0f, 0.0f, false, true);
+		if (SwapChain1)
+		{
+			DXGI_PRESENT_PARAMETERS presentParams = {};
+			SwapChain1->Present1(0, 0, &presentParams);
+		}
+		else
+		{
+			SwapChain->Present(0, 0);
+		}
+	}
+
+	// Reset for the next frame (mono Unlock does the equivalent inline).
+	QueuedBatches.clear();
+	Batch = DrawBatchEntry();
+	SceneVertexPos = 0;
+	SceneIndexPos = 0;
+	VRClearZAt.clear();
+	VRHudStart = -1;
+	VRCurProj = VRPROJ_WORLD;
+
+	unguard;
 }
 
 void UD3D11RenderDevice::CreateVertexShader(ComPtr<ID3D11VertexShader>& outShader, const std::string& shaderName, ComPtr<ID3D11InputLayout>& outInputLayout, const std::string& inputLayoutName, const std::vector<D3D11_INPUT_ELEMENT_DESC>& elements, const std::string& filename, const std::vector<std::string> defines)

@@ -10,6 +10,7 @@
 #include "TextureManager.h"
 #include "UploadManager.h"
 #include "CachedTexture.h"
+#include "VRBackend.h"
 
 struct SceneVertex
 {
@@ -134,12 +135,14 @@ public:
 		ComPtr<ID3D11Texture2D> ColorBuffer;
 		ComPtr<ID3D11Texture2D> HitBuffer;
 		ComPtr<ID3D11Texture2D> DepthBuffer;
+		ComPtr<ID3D11Texture2D> MirrorDepthBuffer; // 1-sample depth for the no-AA VR mirror pass
 		ComPtr<ID3D11Texture2D> PPImage[2];
 		ComPtr<ID3D11Texture2D> PPHitBuffer;
 		ComPtr<ID3D11Texture2D> StagingHitBuffer;
 		ComPtr<ID3D11RenderTargetView> ColorBufferView;
 		ComPtr<ID3D11RenderTargetView> HitBufferView;
 		ComPtr<ID3D11DepthStencilView> DepthBufferView;
+		ComPtr<ID3D11DepthStencilView> MirrorDepthBufferView;
 		ComPtr<ID3D11RenderTargetView> PPHitBufferView;
 		ComPtr<ID3D11RenderTargetView> PPImageView[2];
 		ComPtr<ID3D11ShaderResourceView> HitBufferShaderView;
@@ -193,6 +196,7 @@ public:
 		uint32_t TexSamplerMode = 0;
 		uint32_t DetailtexSamplerMode = 0;
 		uint32_t MacrotexSamplerMode = 0;
+		int VRProj = 0; // which eye projection this batch replays with (VRPROJ_*)
 	} Batch;
 	std::vector<DrawBatchEntry> QueuedBatches;
 	CachedTexture* nulltex = nullptr;
@@ -202,6 +206,11 @@ public:
 
 	uint32_t* SceneIndexes = nullptr;
 	size_t SceneIndexPos = 0;
+
+	// Runtime buffer capacity. Defaults to the (FPS-tuned) mono sizes; only VR
+	// bumps them, so the mono path keeps its exact flush cadence.
+	int SceneVertexBufferCap = SceneVertexBufferSize;
+	int SceneIndexBufferCap = SceneIndexBufferSize;
 
 	struct
 	{
@@ -255,6 +264,23 @@ public:
 	INT RefreshRate;
 	BITFIELD GammaCorrectScreenshots;
 	BITFIELD UseDebugLayer;
+
+	// VR (OpenXR). Everything VR is gated on UseVR; mono path is untouched.
+	BITFIELD UseVR;
+	FLOAT VRWorldScale;   // UU per metre (IPD / eye-offset calibration)
+	FLOAT VRHudDepth;     // view-space Z (UU) gameplay HUD is pushed to (convergence)
+	FLOAT VRUIDepth;      // ... depth for HUD/UI when the mouse is free (menu/console)
+	FLOAT VRCrosshairDepth; // ... depth for centre tiles (the crosshair) in gameplay (mouse captured)
+	FLOAT VRResScale;     // eye render supersampling vs the runtime's recommended resolution
+	FLOAT VRHeightOffset; // view-space vertical shift (UU) of the eyes for comfort (M0 has no head pitch)
+	BITFIELD VRClearZBeforeHud; // clear depth before HUD so it/the crosshair aren't occluded by world geometry
+	BYTE VRLookMode;      // head-look mode. 0 = virtual screen (gameplay: roll only; menu: look around the screen)
+	FLOAT VRHudScaleX;    // scale HUD toward the centre horizontally so corner elements stay inside the FOV (gameplay only)
+	FLOAT VRHudScaleY;    // ... and vertically
+	FLOAT VRWeaponIPDScale; // stereo separation for the first-person weapon (HACKFLAGS_NoNearZ); <1 pulls it out of your nose
+	FLOAT VRBrightnessScale;  // HMD eye brightness = game brightness * scale + offset (eye only; mirror keeps the game's)
+	FLOAT VRBrightnessOffset;
+	BYTE VRMirrorMode;        // desktop mirror: 0=off, 1=when headset removed (default), 2=in menu, 3=always
 
 	struct
 	{
@@ -324,7 +350,55 @@ private:
 
 	void AddDrawBatch();
 	void DrawBatches(bool nextBuffer = false);
-	void DrawEntry(const DrawBatchEntry& entry);
+	void DrawEntry(const DrawBatchEntry& entry, bool forceNoDepth = false);
+
+	// VR runtime state + helpers (only touched when UseVR).
+	VRBackend* VR = nullptr;
+	bool VRRetaining = false;    // true during a VR frame: DrawBatches accumulates instead of drawing
+	bool VRShouldRender = false; // this VR frame wants eye rendering (else compositor said skip)
+	VREyePose VREyes[2];
+	ScenePipelineState VRCursorPipeline; // cursor pipeline forced to a near depth range so it draws on top
+	// Cached UWindow-cursor property offsets (Root.MouseWindow.Cursor.tex/HotX/HotY). Classes
+	// never unload mid-game, so these are resolved once per console class — no per-frame FindField.
+	struct VRCursorRefl
+	{
+		UClass* ConsoleClass = nullptr;
+		UObjectProperty* RootProp = nullptr;
+		UObjectProperty* MouseWindowProp = nullptr;
+		UStructProperty* CursorProp = nullptr; // Cursor is a struct, not an object
+		UObjectProperty* TexProp = nullptr;
+		UIntProperty* HotXProp = nullptr;
+		UIntProperty* HotYProp = nullptr;
+	} VRCursor;
+	std::vector<size_t> VRClearZAt; // batch indices where the depth buffer is cleared during replay (skybox ClearZ, HUD)
+	int VRHudStart = -1;            // first HUD batch (PostRender begins); HUD drawn with depth test off (painter's order, no z-fight)
+	bool VRSkyZones[64] = {};       // per-zone: geometry in this zone is a skybox (drawn with zero IPD -> infinity)
+	ULevel* VRSkyZonesLevel = nullptr; // level the flags were built for (rebuild on change)
+	// Per-batch eye projection tags (DrawBatchEntry::VRProj), set during accumulation.
+	enum { VRPROJ_WORLD = 0, VRPROJ_WEAPON, VRPROJ_CROSSHAIR, VRPROJ_HUDOVERLAY, VRPROJ_SKY, VRPROJ_FLASH };
+	int VRCurProj = 0;             // projection tag for the batch currently accumulating
+	ID3D11DepthStencilView* VRReplayDepth = nullptr; // depth view the current replay clears (eyes: MSAA; mirror: 1-sample)
+	int VRDropped = 0;             // primitives dropped this window because the VR buffer was full
+	DOUBLE VRLastDropLog = 0.0;    // appSecondsNew() of the last overflow report (throttle)
+	bool VRWorn = true;            // cached headset-worn state (refreshed ~once/sec, not per frame)
+	DOUBLE VRWornCheck = 0.0;      // appSecondsNew() of the last worn poll (throttle)
+	ComPtr<ID3D11DepthStencilState> VRNoDepthState; // depth test disabled, for the HUD range
+	vec4 VRHeadRef = vec4(0.0f, 0.0f, 0.0f, 1.0f); // recenter reference head orientation (quaternion)
+	bool VRRecenterPending = false; // console/menu-exit asked to recenter next frame
+	bool VRWasMenu = false;         // mouse-free (UI) state last frame, to recenter on menu->gameplay
+	void StartVR();
+	void RenderVREyes();
+	bool VRWantMirror(); // should the desktop mirror render this frame? (VRMirrorMode + worn + menu; worn poll throttled)
+	void DrawVRCursor(); // draw the real UWindow cursor into the eyes (HMD has no OS cursor)
+	void VRSetProj(int proj); // tag the accumulating batch's eye projection (VRPROJ_*), boundary on change
+	bool VRIsSkyFrame(const FSceneNode* Frame); // is this frame rendering a skybox zone? (cached per level)
+	void VRBeginHudRange();   // start the HUD range (VRHudStart, depth clear, screen frame)
+	void VRBeginPostRender(); // trigger VRBeginHudRange on the first PostRender draw
+	void InjectVRScreenFrame(); // black border masking geometry outside the game FOV (the eye FOV is wider)
+	void SetupSceneTarget(uint32_t width, uint32_t height);
+	void DrawSceneWithClears(const mat4& objectToProjection, size_t begin, size_t end);
+	void RunPresentPass(ID3D11RenderTargetView* output, UINT width, UINT height, float brightnessScale = 1.0f, float brightnessOffset = 0.0f, bool bloom = true, bool alreadyResolved = false);
+	void SetupSceneTargetMirror(uint32_t width, uint32_t height); // 1-sample mirror target (PPImage[0] + 1-sample depth), no MSAA
 
 	void PrintDebugLayerMessages();
 
@@ -341,11 +415,24 @@ private:
 			return { nullptr, nullptr, 0 };
 
 		// If buffers are full, flush and wait for room.
-		if (SceneVertexPos + vcount > (size_t)SceneVertexBufferSize || SceneIndexPos + icount > (size_t)SceneIndexBufferSize)
+		if (SceneVertexPos + vcount > (size_t)SceneVertexBufferCap || SceneIndexPos + icount > (size_t)SceneIndexBufferCap)
 		{
 			// If the request is larger than our buffers we can't draw this.
-			if (vcount > (size_t)SceneVertexBufferSize || icount > (size_t)SceneIndexBufferSize)
+			if (vcount > (size_t)SceneVertexBufferCap || icount > (size_t)SceneIndexBufferCap)
+			{
+				if (VRRetaining)
+					VRDropped++;
 				return { nullptr, nullptr, 0 };
+			}
+
+			// VR retains the whole frame and can't flush mid-frame: DrawBatches would
+			// not free space, and falling through would hand back a pointer past the
+			// buffer end (overrun -> crash). Drop this primitive instead.
+			if (VRRetaining)
+			{
+				VRDropped++;
+				return { nullptr, nullptr, 0 };
+			}
 
 			DrawBatches(true);
 		}
@@ -369,7 +456,7 @@ private:
 
 	vec4 ApplyInverseGamma(vec4 color);
 
-	PresentPushConstants GetPresentPushConstants();
+	PresentPushConstants GetPresentPushConstants(float brightnessScale = 1.0f, float brightnessOffset = 0.0f);
 
 	bool VerticesMapped() const { return SceneVertices && SceneIndexes; }
 	void MapVertices(bool nextBuffer);
