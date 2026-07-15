@@ -269,6 +269,8 @@ public:
 	BITFIELD UseVR;
 	FLOAT VRWorldScale;   // UU per metre (IPD / eye-offset calibration)
 	FLOAT VRHudDepth;     // view-space Z (UU) gameplay HUD is pushed to (convergence)
+	FLOAT VRHudDepthBottom; // nearer depth for the bottom-of-screen HUD zone (weapon bar under the nose); <=0 disables (uses VRHudDepth)
+	FLOAT VRHudBottomY;   // bottom zone = screen Y fraction below this (0..1); default 0.7 = bottom 30%
 	FLOAT VRUIDepth;      // ... depth for HUD/UI when the mouse is free (menu/console)
 	FLOAT VRCrosshairDepth; // ... depth for centre tiles (the crosshair) in gameplay (mouse captured)
 	FLOAT VRResScale;     // eye render supersampling vs the runtime's recommended resolution
@@ -281,6 +283,7 @@ public:
 	FLOAT VRBrightnessScale;  // HMD eye brightness = game brightness * scale + offset (eye only; mirror keeps the game's)
 	FLOAT VRBrightnessOffset;
 	BYTE VRMirrorMode;        // desktop mirror: 0=off, 1=when headset removed (default), 2=in menu, 3=always
+	UBOOL VRScaleHudMeshes;   // scale PostRender Gouraud meshes (e.g. mod radar icons) with the HUD, at HUD depth
 
 	struct
 	{
@@ -375,8 +378,9 @@ private:
 	bool VRSkyZones[64] = {};       // per-zone: geometry in this zone is a skybox (drawn with zero IPD -> infinity)
 	ULevel* VRSkyZonesLevel = nullptr; // level the flags were built for (rebuild on change)
 	// Per-batch eye projection tags (DrawBatchEntry::VRProj), set during accumulation.
-	enum { VRPROJ_WORLD = 0, VRPROJ_WEAPON, VRPROJ_CROSSHAIR, VRPROJ_HUDOVERLAY, VRPROJ_SKY, VRPROJ_FLASH };
+	enum { VRPROJ_WORLD = 0, VRPROJ_WEAPON, VRPROJ_CROSSHAIR, VRPROJ_HUDOVERLAY, VRPROJ_SKY, VRPROJ_FLASH, VRPROJ_HUDMESH };
 	int VRCurProj = 0;             // projection tag for the batch currently accumulating
+	bool VRHudMeshArm = false;     // a HUD-phase ClearZ armed the next Gouraud as a HUD mesh (VRScaleHudMeshes)
 	ID3D11DepthStencilView* VRReplayDepth = nullptr; // depth view the current replay clears (eyes: MSAA; mirror: 1-sample)
 	int VRDropped = 0;             // primitives dropped this window because the VR buffer was full
 	DOUBLE VRLastDropLog = 0.0;    // appSecondsNew() of the last overflow report (throttle)

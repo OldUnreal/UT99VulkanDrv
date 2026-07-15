@@ -80,6 +80,8 @@ void UD3D11RenderDevice::StaticConstructor()
 	UseVR = 0; // opt-in (VR users are rare). Once on, the Init probe auto-detects the headset (else mono).
 	VRWorldScale = 52.5f;
 	VRHudDepth = 150.0f;
+	VRHudDepthBottom = 0.0f; // disabled by default (bottom zone uses VRHudDepth)
+	VRHudBottomY = 0.7f;
 	VRUIDepth = 150.0f;
 	VRCrosshairDepth = 150.0f;
 	VRResScale = 1.5f;
@@ -92,6 +94,7 @@ void UD3D11RenderDevice::StaticConstructor()
 	VRBrightnessScale = 1.0f;
 	VRBrightnessOffset = 0.0f;
 	VRMirrorMode = 1; // 0=off, 1=when headset removed, 2=in menu, 3=always
+	VRScaleHudMeshes = 0;
 
 #if defined(OLDUNREAL469SDK)
 	new(GetClass(), TEXT("UseLightmapAtlas"), RF_Public) UBoolProperty(CPP_PROPERTY(UseLightmapAtlas), TEXT("Display"), CPF_Config);
@@ -104,6 +107,8 @@ void UD3D11RenderDevice::StaticConstructor()
 	new(GetClass(), TEXT("UseVR"), RF_Public) UBoolProperty(CPP_PROPERTY(UseVR), TEXT("Display"), CPF_Config);
 	new(GetClass(), TEXT("VRWorldScale"), RF_Public) UFloatProperty(CPP_PROPERTY(VRWorldScale), TEXT("Display"), CPF_Config);
 	new(GetClass(), TEXT("VRHudDepth"), RF_Public) UFloatProperty(CPP_PROPERTY(VRHudDepth), TEXT("Display"), CPF_Config);
+	new(GetClass(), TEXT("VRHudDepthBottom"), RF_Public) UFloatProperty(CPP_PROPERTY(VRHudDepthBottom), TEXT("Display"), CPF_Config);
+	new(GetClass(), TEXT("VRHudBottomY"), RF_Public) UFloatProperty(CPP_PROPERTY(VRHudBottomY), TEXT("Display"), CPF_Config);
 	new(GetClass(), TEXT("VRUIDepth"), RF_Public) UFloatProperty(CPP_PROPERTY(VRUIDepth), TEXT("Display"), CPF_Config);
 	new(GetClass(), TEXT("VRCrosshairDepth"), RF_Public) UFloatProperty(CPP_PROPERTY(VRCrosshairDepth), TEXT("Display"), CPF_Config);
 	new(GetClass(), TEXT("VRResScale"), RF_Public) UFloatProperty(CPP_PROPERTY(VRResScale), TEXT("Display"), CPF_Config);
@@ -116,6 +121,7 @@ void UD3D11RenderDevice::StaticConstructor()
 	new(GetClass(), TEXT("VRBrightnessScale"), RF_Public) UFloatProperty(CPP_PROPERTY(VRBrightnessScale), TEXT("Display"), CPF_Config);
 	new(GetClass(), TEXT("VRBrightnessOffset"), RF_Public) UFloatProperty(CPP_PROPERTY(VRBrightnessOffset), TEXT("Display"), CPF_Config);
 	new(GetClass(), TEXT("VRMirrorMode"), RF_Public) UByteProperty(CPP_PROPERTY(VRMirrorMode), TEXT("Display"), CPF_Config);
+	new(GetClass(), TEXT("VRScaleHudMeshes"), RF_Public) UBoolProperty(CPP_PROPERTY(VRScaleHudMeshes), TEXT("Display"), CPF_Config);
 	new(GetClass(), TEXT("GammaOffset"), RF_Public) UFloatProperty(CPP_PROPERTY(GammaOffset), TEXT("Display"), CPF_Config);
 	new(GetClass(), TEXT("GammaOffsetRed"), RF_Public) UFloatProperty(CPP_PROPERTY(GammaOffsetRed), TEXT("Display"), CPF_Config);
 	new(GetClass(), TEXT("GammaOffsetGreen"), RF_Public) UFloatProperty(CPP_PROPERTY(GammaOffsetGreen), TEXT("Display"), CPF_Config);
@@ -2565,7 +2571,10 @@ void UD3D11RenderDevice::DrawGouraudPolygon(FSceneNode* Frame, FTextureInfo& Inf
 
 	if (VRRetaining)
 	{
-		VRSetProj((GUglyHackFlags & HACKFLAGS_NoNearZ) ? VRPROJ_WEAPON : VRIsSkyFrame(Frame) ? VRPROJ_SKY : VRPROJ_WORLD);
+		if (VRHudMeshArm)
+			VRSetProj(VRPROJ_HUDMESH); // mesh drawn after a HUD-phase ClearZ -> HUD scale + HUD depth
+		else
+			VRSetProj((GUglyHackFlags & HACKFLAGS_NoNearZ) ? VRPROJ_WEAPON : VRIsSkyFrame(Frame) ? VRPROJ_SKY : VRPROJ_WORLD);
 		VRBeginPostRender();
 	}
 
@@ -2731,7 +2740,10 @@ void UD3D11RenderDevice::DrawGouraudTriangles(const FSceneNode* Frame, const FTe
 
 	if (VRRetaining)
 	{
-		VRSetProj((GUglyHackFlags & HACKFLAGS_NoNearZ) ? VRPROJ_WEAPON : VRIsSkyFrame(Frame) ? VRPROJ_SKY : VRPROJ_WORLD);
+		if (VRHudMeshArm)
+			VRSetProj(VRPROJ_HUDMESH); // mesh drawn after a HUD-phase ClearZ -> HUD scale + HUD depth
+		else
+			VRSetProj((GUglyHackFlags & HACKFLAGS_NoNearZ) ? VRPROJ_WEAPON : VRIsSkyFrame(Frame) ? VRPROJ_SKY : VRPROJ_WORLD);
 		VRBeginPostRender();
 	}
 
@@ -2946,6 +2958,7 @@ void UD3D11RenderDevice::DrawTileList(const FSceneNode* Frame, const FTextureInf
 	// Tile lists are HUD text/bars, never the crosshair; NoNearZ -> HUD overlay, else world.
 	if (VRRetaining)
 	{
+		VRHudMeshArm = false; // a tile ends the post-ClearZ mesh run
 		VRSetProj((GUglyHackFlags & HACKFLAGS_NoNearZ) ? VRPROJ_HUDOVERLAY : VRPROJ_WORLD);
 		VRBeginPostRender();
 	}
@@ -3153,6 +3166,7 @@ void UD3D11RenderDevice::DrawTile(FSceneNode* Frame, FTextureInfo& Info, FLOAT X
 	// else the weapon bar rides the aim point.
 	if (VRRetaining)
 	{
+		VRHudMeshArm = false; // a tile ends the post-ClearZ mesh run
 		if (GUglyHackFlags & HACKFLAGS_NoNearZ)
 		{
 			// Centre = crosshair (no size test — sniper/vehicle reticles are huge); off-centre = HUD.
@@ -3231,7 +3245,14 @@ void UD3D11RenderDevice::DrawTile(FSceneNode* Frame, FTextureInfo& Info, FLOAT X
 				float cy = Y + YL * 0.5f;
 				bool centre =
 					Abs(cx - Frame->FX2) < Frame->FX * 0.06f && Abs(cy - Frame->FY2) < Frame->FY * 0.06f;
-				Z = centre ? VRCrosshairDepth : VRHudDepth;
+				// Bottom zone (weapon bar under the nose): a nearer depth is far easier to fuse
+				// there — round lenses clip the lower edge and the nose is close in real life.
+				if (centre)
+					Z = VRCrosshairDepth;
+				else if (VRHudDepthBottom > 0.0f && cy > Frame->FY * VRHudBottomY)
+					Z = VRHudDepthBottom;
+				else
+					Z = VRHudDepth;
 			}
 			else
 			{
@@ -3497,6 +3518,11 @@ void UD3D11RenderDevice::ClearZ(FSceneNode* Frame)
 		// clears depth here (e.g. after the skybox, so the world draws over it).
 		AddDrawBatch();
 		VRClearZAt.push_back(QueuedBatches.size());
+		// A ClearZ during the HUD phase is an explicit "draw the following on top" signal:
+		// mods use it before a rotated actor mesh (radar icon) they can't do as a tile. Arm
+		// HUD-mesh mode so the next Gouraud replays at HUD scale/depth (see DrawGouraud*).
+		if (VRScaleHudMeshes && (GUglyHackFlags & HACKFLAGS_PostRender))
+			VRHudMeshArm = true;
 		return;
 	}
 
@@ -4059,7 +4085,13 @@ void UD3D11RenderDevice::VRBeginHudRange()
 	VRHudStart = (int)QueuedBatches.size();
 	if (VRClearZBeforeHud)
 		VRClearZAt.push_back((size_t)VRHudStart);
+	// The border draws with the world projection (a far black edge; must not inherit the
+	// triggering draw's tag — a HUD-scaled border would move the visible FOV edge).
+	int saved = VRCurProj;
+	VRCurProj = VRPROJ_WORLD;
 	InjectVRScreenFrame();
+	AddDrawBatch();
+	VRCurProj = saved;
 }
 
 void UD3D11RenderDevice::VRBeginPostRender()
@@ -4337,6 +4369,14 @@ void UD3D11RenderDevice::RenderVREyes()
 		float hudOverlayIpd = scale * invZoom / Max(VRHudDepth, 1.0f);
 		mat4 hudOverlayView = mat4::translate(-off.x * hudOverlayIpd, -off.y * hudOverlayIpd, off.z * scale);
 		mat4 hudOverlayProj = eyeProj * hudOverlayView * lookInv;
+		// HUD meshes (VRScaleHudMeshes): honest worldProj (full IPD at the mesh's true Z ->
+		// comfortable convergence at the mod's render distance). The HUD screen scale must be
+		// applied in VIEW space (worldProj * scale — scales the vertex BEFORE projection, z
+		// untouched), NOT clip space (scale * worldProj): the eye frustum is asymmetric, and
+		// scaling clip.x also scales the skew*z disparity term -> stereo diverges past infinity.
+		float hudMeshSX = menuUp ? 1.0f : VRHudScaleX;
+		float hudMeshSY = menuUp ? 1.0f : VRHudScaleY;
+		mat4 hudMeshProj = worldProj * mat4::scale(hudMeshSX, hudMeshSY, 1.0f);
 
 		SetupSceneTarget(ew, eh);
 		size_t total = QueuedBatches.size();
@@ -4356,6 +4396,7 @@ void UD3D11RenderDevice::RenderVREyes()
 				(pt == VRPROJ_WEAPON) ? weaponProj :
 				(pt == VRPROJ_CROSSHAIR) ? overlayProj :
 				(pt == VRPROJ_HUDOVERLAY) ? hudOverlayProj :
+				(pt == VRPROJ_HUDMESH) ? hudMeshProj :
 				(pt == VRPROJ_FLASH) ? flashProj : worldProj;
 			DrawSceneWithClears(proj, j, k);
 			j = k;
@@ -4393,16 +4434,19 @@ void UD3D11RenderDevice::RenderVREyes()
 		float aspect = CurrentFrame->FY / CurrentFrame->FX;
 		mat4 monoProj = mat4::frustum(-rprojz, rprojz, -aspect * rprojz, aspect * rprojz, 1.0f, 32768.0f, handedness::left, clipzrange::zero_positive_w);
 		mat4 flashProj = mat4::identity();
+		// HUD meshes get the same screen scale on the mirror as the tiles (view-space, before
+		// the projection — see the eye path; monoProj is symmetric so the order is cosmetic here).
+		mat4 hudMeshProj = monoProj * mat4::scale(menuUp ? 1.0f : VRHudScaleX, menuUp ? 1.0f : VRHudScaleY, 1.0f);
 		SetupSceneTargetMirror(ew, eh); // 1-sample into PPImage[0]: no MSAA, no resolve, no bloom
 		// Mirror: all scene batches (no cursor) with the plain mono projection, except the
-		// flash quad which is already clip-space (identity), same depth clears.
+		// flash quad (already clip-space) and HUD meshes (scaled), same depth clears.
 		for (size_t j = 0; j < sceneBatches; )
 		{
 			int pt = QueuedBatches[j].VRProj;
 			size_t k = j;
 			while (k < sceneBatches && QueuedBatches[k].VRProj == pt)
 				k++;
-			DrawSceneWithClears((pt == VRPROJ_FLASH) ? flashProj : monoProj, j, k);
+			DrawSceneWithClears((pt == VRPROJ_FLASH) ? flashProj : (pt == VRPROJ_HUDMESH) ? hudMeshProj : monoProj, j, k);
 			j = k;
 		}
 	}
@@ -4439,6 +4483,7 @@ void UD3D11RenderDevice::RenderVREyes()
 	VRClearZAt.clear();
 	VRHudStart = -1;
 	VRCurProj = VRPROJ_WORLD;
+	VRHudMeshArm = false;
 
 	unguard;
 }
