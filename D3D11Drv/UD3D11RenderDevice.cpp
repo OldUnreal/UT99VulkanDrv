@@ -4027,7 +4027,12 @@ void UD3D11RenderDevice::DrawSceneWithClears(const mat4& objectToProjection, siz
 			if (clearAt == i)
 				Context->ClearDepthStencilView(VRReplayDepth, D3D11_CLEAR_DEPTH, 1.0f, 0);
 		// HUD range: depth test off so coplanar HUD tiles don't z-fight.
-		bool noDepth = (VRHudStart >= 0 && i >= (size_t)VRHudStart);
+		// Flat NoNearZ overlay tiles (crosshair, mod HUD bars like a vehicle health bar) also
+		// draw with depth off — they're on-top HUD, and depth-tested they z-fight against the
+		// world when the phase that clears depth first (the weapon) isn't drawn (e.g. in menu).
+		int pt = QueuedBatches[i].VRProj;
+		bool noDepth = (VRHudStart >= 0 && i >= (size_t)VRHudStart)
+			|| pt == VRPROJ_CROSSHAIR || pt == VRPROJ_HUDOVERLAY;
 		DrawEntry(QueuedBatches[i], noDepth);
 	}
 }
