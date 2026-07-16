@@ -1826,6 +1826,8 @@ void UD3D11RenderDevice::Lock(FPlane InFlashScale, FPlane InFlashFog, FPlane Scr
 	guard(UD3D11RenderDevice::Lock);
 
 	VRMainCaptured = false; // recapture the main scene node's FOV this frame
+	VRSubRProjZ = 0.0f;     // no sub-view FOV seen yet this frame
+	VRSubX = 0;
 
 	Timers.DrawBatches.Reset();
 	Timers.DrawComplexSurface.Reset();
@@ -2573,8 +2575,8 @@ void UD3D11RenderDevice::DrawGouraudPolygon(FSceneNode* Frame, FTextureInfo& Inf
 
 	if (VRRetaining)
 	{
-		if (VRHudMeshArm)
-			VRSetProj(VRPROJ_HUDMESH); // mesh drawn after a HUD-phase ClearZ -> HUD scale + HUD depth
+		if (VRHudMeshArm || VRInSubView)
+			VRSetProj(VRPROJ_HUDMESH); // HUD-phase ClearZ (radar) or menu preview sub-view -> HUD scale + depth-on
 		else
 			VRSetProj((GUglyHackFlags & HACKFLAGS_NoNearZ) ? VRPROJ_WEAPON : VRIsSkyFrame(Frame) ? VRPROJ_SKY : VRPROJ_WORLD);
 		VRBeginPostRender();
@@ -2742,8 +2744,8 @@ void UD3D11RenderDevice::DrawGouraudTriangles(const FSceneNode* Frame, const FTe
 
 	if (VRRetaining)
 	{
-		if (VRHudMeshArm)
-			VRSetProj(VRPROJ_HUDMESH); // mesh drawn after a HUD-phase ClearZ -> HUD scale + HUD depth
+		if (VRHudMeshArm || VRInSubView)
+			VRSetProj(VRPROJ_HUDMESH); // HUD-phase ClearZ (radar) or menu preview sub-view -> HUD scale + depth-on
 		else
 			VRSetProj((GUglyHackFlags & HACKFLAGS_NoNearZ) ? VRPROJ_WEAPON : VRIsSkyFrame(Frame) ? VRPROJ_SKY : VRPROJ_WORLD);
 		VRBeginPostRender();
@@ -3520,9 +3522,10 @@ void UD3D11RenderDevice::ClearZ(FSceneNode* Frame)
 		// clears depth here (e.g. after the skybox, so the world draws over it).
 		AddDrawBatch();
 		VRClearZAt.push_back(QueuedBatches.size());
-		// A ClearZ during the HUD phase is an explicit "draw the following on top" signal:
-		// mods use it before a rotated actor mesh (radar icon) they can't do as a tile. Arm
-		// HUD-mesh mode so the next Gouraud replays at HUD scale/depth (see DrawGouraud*).
+		// A ClearZ during the HUD phase is an explicit "draw the following 3D mesh on top" signal:
+		// a mod's rotated actor mesh (radar icon). Arm HUD-mesh mode so the next Gouraud replays at
+		// HUD scale/depth. The menu player-mesh preview uses ClearZ=False, so it is NOT armed here —
+		// it is detected as a sub-view instead (see SetSceneNode/DrawGouraud VRInSubView).
 		if (VRScaleHudMeshes && (GUglyHackFlags & HACKFLAGS_PostRender))
 			VRHudMeshArm = true;
 		return;
@@ -3718,7 +3721,20 @@ void UD3D11RenderDevice::SetSceneNode(FSceneNode* Frame)
 	if (!VRMainCaptured)
 	{
 		VRMainRProjZ = RProjZ;
+		VRMainX = Frame->X;
 		VRMainCaptured = true;
+	}
+	// The menu player-mesh preview (UMenuPlayerMeshClient) renders a Gouraud actor into a sub-region
+	// (offset/narrower than the window) at a narrow FOV, via DrawClippedActor with ClearZ=False — so
+	// there is no ClearZ to arm HUDMESH. Detect the sub-view by its RECT, tag its mesh HUDMESH, and
+	// capture its FOV+width so it can be magnified to fill the virtual screen like the 2D render.
+	// The leftover full-rect node shares the poisoned FOV but is NOT the sub-view (keying off FOV
+	// would let it clobber the sub width), so key off the rect.
+	VRInSubView = VRRetaining && VRMainCaptured && (Frame->XB != 0 || Frame->X < VRMainX);
+	if (VRInSubView)
+	{
+		VRSubRProjZ = RProjZ;
+		VRSubX = Frame->X;
 	}
 	if (VRRetaining)
 		RProjZ = VRMainRProjZ; // ignore a poisoned leftover FOV for HUD baking (mono frustum below is unused in retain)
@@ -4045,9 +4061,13 @@ void UD3D11RenderDevice::DrawSceneWithClears(const mat4& objectToProjection, siz
 		// Flat NoNearZ overlay tiles (crosshair, mod HUD bars like a vehicle health bar) also
 		// draw with depth off — they're on-top HUD, and depth-tested they z-fight against the
 		// world when the phase that clears depth first (the weapon) isn't drawn (e.g. in menu).
+		// 3D meshes drawn in the HUD phase (VRPROJ_HUDMESH: radar icons, the menu player-mesh
+		// preview) keep depth so their own polygons self-occlude — only flat tiles/overlays go
+		// depth-off.
 		int pt = QueuedBatches[i].VRProj;
-		bool noDepth = (VRHudStart >= 0 && i >= (size_t)VRHudStart)
-			|| pt == VRPROJ_CROSSHAIR || pt == VRPROJ_HUDOVERLAY;
+		bool noDepth = pt != VRPROJ_HUDMESH
+			&& ((VRHudStart >= 0 && i >= (size_t)VRHudStart)
+				|| pt == VRPROJ_CROSSHAIR || pt == VRPROJ_HUDOVERLAY);
 		DrawEntry(QueuedBatches[i], noDepth);
 	}
 }
@@ -4395,8 +4415,15 @@ void UD3D11RenderDevice::RenderVREyes()
 		// applied in VIEW space (worldProj * scale — scales the vertex BEFORE projection, z
 		// untouched), NOT clip space (scale * worldProj): the eye frustum is asymmetric, and
 		// scaling clip.x also scales the skew*z disparity term -> stereo diverges past infinity.
-		float hudMeshSX = menuUp ? 1.0f : VRHudScaleX;
-		float hudMeshSY = menuUp ? 1.0f : VRHudScaleY;
+		// Menu player-mesh preview (UMenuPlayerMeshClient) renders with a narrow sub-view FOV into a
+		// sub-region, so on the full virtual screen it comes out tiny. It fills the sub-region
+		// (subX of the window width), so scale = FOV ratio * width fraction to match the 2D render.
+		// ponytail: stays centred, not offset into the right-hand panel — exact position needs the
+		// full sub-viewport render (own frustum + scissor), not just a scale.
+		float menuMeshScale = (menuUp && VRSubRProjZ > 0.0f && VRMainX > 0)
+			? (VRMainRProjZ / VRSubRProjZ) * ((float)VRSubX / (float)VRMainX) : 1.0f;
+		float hudMeshSX = menuUp ? menuMeshScale : (VRScaleHudMeshes ? VRHudScaleX : 1.0f);
+		float hudMeshSY = menuUp ? menuMeshScale : (VRScaleHudMeshes ? VRHudScaleY : 1.0f);
 		mat4 hudMeshProj = worldProj * mat4::scale(hudMeshSX, hudMeshSY, 1.0f);
 
 		SetupSceneTarget(ew, eh);
@@ -4457,7 +4484,11 @@ void UD3D11RenderDevice::RenderVREyes()
 		mat4 flashProj = mat4::identity();
 		// HUD meshes get the same screen scale on the mirror as the tiles (view-space, before
 		// the projection — see the eye path; monoProj is symmetric so the order is cosmetic here).
-		mat4 hudMeshProj = monoProj * mat4::scale(menuUp ? 1.0f : VRHudScaleX, menuUp ? 1.0f : VRHudScaleY, 1.0f);
+		float menuMeshScale = (menuUp && VRSubRProjZ > 0.0f && VRMainX > 0)
+			? (VRMainRProjZ / VRSubRProjZ) * ((float)VRSubX / (float)VRMainX) : 1.0f;
+		float hmSX = menuUp ? menuMeshScale : (VRScaleHudMeshes ? VRHudScaleX : 1.0f);
+		float hmSY = menuUp ? menuMeshScale : (VRScaleHudMeshes ? VRHudScaleY : 1.0f);
+		mat4 hudMeshProj = monoProj * mat4::scale(hmSX, hmSY, 1.0f);
 		SetupSceneTargetMirror(ew, eh); // 1-sample into PPImage[0]: no MSAA, no resolve, no bloom
 		// Mirror: all scene batches (no cursor) with the plain mono projection, except the
 		// flash quad (already clip-space) and HUD meshes (scaled), same depth clears.

@@ -382,6 +382,9 @@ private:
 	int VRCurProj = 0;             // projection tag for the batch currently accumulating
 	bool VRHudMeshArm = false;     // a HUD-phase ClearZ armed the next Gouraud as a HUD mesh (VRScaleHudMeshes)
 	float VRMainRProjZ = 1.0f;     // main (first) scene node's tan(FovAngle/2) — replay + HUD baking use THIS, not a poisoned leftover sub-view FOV (menu player-mesh preview)
+	float VRSubRProjZ = 0.0f;      // a sub-view node's tan(FovAngle/2) if it differs from main (menu preview camera) — 0 = none; magnifies its HUDMESH
+	int VRMainX = 0, VRSubX = 0;   // main window vs sub-view render width — preview HUDMESH scale = (mainRPZ/subRPZ)*(subX/mainX)
+	bool VRInSubView = false;      // current scene node is the preview sub-region (rect != window) — its Gouraud is tagged HUDMESH for scale + depth
 	bool VRMainCaptured = false;   // main scene node captured this frame (reset each Lock)
 	ID3D11DepthStencilView* VRReplayDepth = nullptr; // depth view the current replay clears (eyes: MSAA; mirror: 1-sample)
 	int VRDropped = 0;             // primitives dropped this window because the VR buffer was full
