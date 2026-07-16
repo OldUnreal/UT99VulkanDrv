@@ -1710,6 +1710,45 @@ UBOOL UD3D11RenderDevice::Exec(const TCHAR* Cmd, FOutputDevice& Ar)
 		return 1;
 	}
 
+	// Mod-facing VR query interface. A mod reads these via PlayerPawn.ConsoleCommand("VR ..."),
+	// which returns whatever we Log here — so the mod stays renderer-agnostic (any VR driver that
+	// implements this exec answers; the mod never needs to know which one is live).
+	if (ParseCommand(&Cmd, TEXT("VR")))
+	{
+		if (ParseCommand(&Cmd, TEXT("GETPARAM")))
+		{
+			// VR GETPARAM <PropName> -> current value of a config knob (e.g. VRHudDepth), so the mod
+			// can render actors at the same depth the user dialled in.
+			while (*Cmd == ' ') Cmd++;
+			TCHAR Name[128] = TEXT("");
+			INT n = 0;
+			while (*Cmd && *Cmd != ' ' && n < 127) Name[n++] = *Cmd++;
+			Name[n] = 0;
+			UProperty* Prop = FindField<UProperty>(GetClass(), Name);
+			if (Prop)
+			{
+				BYTE* V = (BYTE*)this + Prop->Offset;
+				if (Cast<UFloatProperty>(Prop))
+					Ar.Logf(TEXT("%f"), *(FLOAT*)V);
+				else if (Cast<UIntProperty>(Prop))
+					Ar.Logf(TEXT("%i"), *(INT*)V);
+				else if (UBoolProperty* BP = Cast<UBoolProperty>(Prop))
+					Ar.Logf(TEXT("%i"), (*(DWORD*)V & BP->BitMask) ? 1 : 0);
+				else if (Cast<UByteProperty>(Prop))
+					Ar.Logf(TEXT("%i"), *(BYTE*)V);
+			}
+			return 1;
+		}
+		if (ParseCommand(&Cmd, TEXT("INGAME")))
+		{
+			// 1 = the game owns the mouse (playing) -> draw actors at gameplay HUD depth; 0 = a
+			// menu/console is up (mouse shown) -> UI depth.
+			Ar.Logf(TEXT("%i"), (Viewport && !Viewport->bShowWindowsMouse) ? 1 : 0);
+			return 1;
+		}
+		return 1;
+	}
+
 	if (ParseCommand(&Cmd, TEXT("DGL")))
 	{
 		if (ParseCommand(&Cmd, TEXT("BUFFERTRIS")))
