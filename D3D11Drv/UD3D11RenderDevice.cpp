@@ -2576,7 +2576,19 @@ void UD3D11RenderDevice::DrawGouraudPolygon(FSceneNode* Frame, FTextureInfo& Inf
 	if (VRRetaining)
 	{
 		if (VRHudMeshArm || VRInSubView)
-			VRSetProj(VRPROJ_HUDMESH); // HUD-phase ClearZ (radar) or menu preview sub-view -> HUD scale + depth-on
+		{
+			// HUD mesh: menu preview sub-view (magnify to fill the virtual screen like the 2D
+			// render — FOV ratio * width fraction, this sub-view's own numbers) or a mod radar
+			// icon (VRHudScale). Per-batch so each preview keeps its own size.
+			float sx, sy;
+			if (VRInSubView)
+			{
+				float s = (VRSubRProjZ > 0.0f && VRMainX > 0) ? (VRMainRProjZ / VRSubRProjZ) * ((float)VRSubX / (float)VRMainX) : 1.0f;
+				sx = s; sy = s;
+			}
+			else { sx = VRHudScaleX; sy = VRHudScaleY; }
+			VRSetMeshProj(sx, sy);
+		}
 		else
 			VRSetProj((GUglyHackFlags & HACKFLAGS_NoNearZ) ? VRPROJ_WEAPON : VRIsSkyFrame(Frame) ? VRPROJ_SKY : VRPROJ_WORLD);
 		VRBeginPostRender();
@@ -2745,7 +2757,19 @@ void UD3D11RenderDevice::DrawGouraudTriangles(const FSceneNode* Frame, const FTe
 	if (VRRetaining)
 	{
 		if (VRHudMeshArm || VRInSubView)
-			VRSetProj(VRPROJ_HUDMESH); // HUD-phase ClearZ (radar) or menu preview sub-view -> HUD scale + depth-on
+		{
+			// HUD mesh: menu preview sub-view (magnify to fill the virtual screen like the 2D
+			// render — FOV ratio * width fraction, this sub-view's own numbers) or a mod radar
+			// icon (VRHudScale). Per-batch so each preview keeps its own size.
+			float sx, sy;
+			if (VRInSubView)
+			{
+				float s = (VRSubRProjZ > 0.0f && VRMainX > 0) ? (VRMainRProjZ / VRSubRProjZ) * ((float)VRSubX / (float)VRMainX) : 1.0f;
+				sx = s; sy = s;
+			}
+			else { sx = VRHudScaleX; sy = VRHudScaleY; }
+			VRSetMeshProj(sx, sy);
+		}
 		else
 			VRSetProj((GUglyHackFlags & HACKFLAGS_NoNearZ) ? VRPROJ_WEAPON : VRIsSkyFrame(Frame) ? VRPROJ_SKY : VRPROJ_WORLD);
 		VRBeginPostRender();
@@ -3777,6 +3801,8 @@ void UD3D11RenderDevice::AddDrawBatch()
 	{
 		Batch.SceneIndexEnd = SceneIndexPos;
 		Batch.VRProj = VRCurProj;
+		Batch.VRMeshSX = VRCurMeshSX;
+		Batch.VRMeshSY = VRCurMeshSY;
 		QueuedBatches.push_back(Batch);
 		Batch.SceneIndexStart = SceneIndexPos;
 	}
@@ -3792,6 +3818,20 @@ void UD3D11RenderDevice::VRSetProj(int proj)
 	{
 		AddDrawBatch();
 		VRCurProj = proj;
+	}
+}
+
+// Tag the accumulating batch as a HUD mesh with its own view-space scale. Each preview/radar mesh
+// carries its own size (subX/FOV differ per sub-view), so boundary the batch on a scale change too —
+// otherwise two previews with different scales would merge and share the last one.
+void UD3D11RenderDevice::VRSetMeshProj(float sx, float sy)
+{
+	if (VRRetaining && (VRCurProj != VRPROJ_HUDMESH || sx != VRCurMeshSX || sy != VRCurMeshSY))
+	{
+		AddDrawBatch();
+		VRCurProj = VRPROJ_HUDMESH;
+		VRCurMeshSX = sx;
+		VRCurMeshSY = sy;
 	}
 }
 
@@ -4410,22 +4450,14 @@ void UD3D11RenderDevice::RenderVREyes()
 		float hudOverlayIpd = scale * invZoom / Max(VRHudDepth, 1.0f);
 		mat4 hudOverlayView = mat4::translate(-off.x * hudOverlayIpd, -off.y * hudOverlayIpd, off.z * scale);
 		mat4 hudOverlayProj = eyeProj * hudOverlayView * lookInv;
-		// HUD meshes (VRScaleHudMeshes): honest worldProj (full IPD at the mesh's true Z ->
-		// comfortable convergence at the mod's render distance). The HUD screen scale must be
-		// applied in VIEW space (worldProj * scale — scales the vertex BEFORE projection, z
-		// untouched), NOT clip space (scale * worldProj): the eye frustum is asymmetric, and
-		// scaling clip.x also scales the skew*z disparity term -> stereo diverges past infinity.
-		// Menu player-mesh preview (UMenuPlayerMeshClient) renders with a narrow sub-view FOV into a
-		// sub-region, so on the full virtual screen it comes out tiny. It fills the sub-region
-		// (subX of the window width), so scale = FOV ratio * width fraction to match the 2D render.
-		// ponytail: stays centred, not offset into the right-hand panel — exact position needs the
-		// full sub-viewport render (own frustum + scissor), not just a scale.
-		float menuMeshScale = (menuUp && VRSubRProjZ > 0.0f && VRMainX > 0)
-			? (VRMainRProjZ / VRSubRProjZ) * ((float)VRSubX / (float)VRMainX) : 1.0f;
-		float hudMeshSX = menuUp ? menuMeshScale : (VRScaleHudMeshes ? VRHudScaleX : 1.0f);
-		float hudMeshSY = menuUp ? menuMeshScale : (VRScaleHudMeshes ? VRHudScaleY : 1.0f);
-		mat4 hudMeshProj = worldProj * mat4::scale(hudMeshSX, hudMeshSY, 1.0f);
-
+		// HUD meshes (menu player-mesh preview, radar icons): honest worldProj (full IPD at the
+		// mesh's true Z -> comfortable convergence) with a per-batch view-space scale so each keeps
+		// its own size (a preview's FOV ratio * width fraction; a radar's VRHudScale) — see the
+		// HUDMESH case in the loop below. The scale is VIEW space (worldProj * scale — scales the
+		// vertex BEFORE projection, z untouched), NOT clip space (scale * worldProj): the eye
+		// frustum is asymmetric, and scaling clip.x also scales the skew*z disparity term -> stereo
+		// diverges past infinity. ponytail: preview stays centred, not offset into its panel —
+		// exact position needs the full sub-viewport render (own frustum + scissor).
 		SetupSceneTarget(ew, eh);
 		size_t total = QueuedBatches.size();
 		// Group adjacent batches by their per-batch projection tag (VRPROJ_*) and replay each
@@ -4439,12 +4471,19 @@ void UD3D11RenderDevice::RenderVREyes()
 			size_t k = j;
 			while (k < total && QueuedBatches[k].VRProj == pt)
 				k++;
+			if (pt == VRPROJ_HUDMESH)
+			{
+				// Per-batch scale: adjacent HUD meshes may be different previews/icons.
+				for (size_t m = j; m < k; m++)
+					DrawSceneWithClears(worldProj * mat4::scale(QueuedBatches[m].VRMeshSX, QueuedBatches[m].VRMeshSY, 1.0f), m, m + 1);
+				j = k;
+				continue;
+			}
 			const mat4& proj =
 				(pt == VRPROJ_SKY) ? skyProj :
 				(pt == VRPROJ_WEAPON) ? weaponProj :
 				(pt == VRPROJ_CROSSHAIR) ? overlayProj :
 				(pt == VRPROJ_HUDOVERLAY) ? hudOverlayProj :
-				(pt == VRPROJ_HUDMESH) ? hudMeshProj :
 				(pt == VRPROJ_FLASH) ? flashProj : worldProj;
 			DrawSceneWithClears(proj, j, k);
 			j = k;
@@ -4482,23 +4521,24 @@ void UD3D11RenderDevice::RenderVREyes()
 		float aspect = CurrentFrame->FY / CurrentFrame->FX;
 		mat4 monoProj = mat4::frustum(-rprojz, rprojz, -aspect * rprojz, aspect * rprojz, 1.0f, 32768.0f, handedness::left, clipzrange::zero_positive_w);
 		mat4 flashProj = mat4::identity();
-		// HUD meshes get the same screen scale on the mirror as the tiles (view-space, before
-		// the projection — see the eye path; monoProj is symmetric so the order is cosmetic here).
-		float menuMeshScale = (menuUp && VRSubRProjZ > 0.0f && VRMainX > 0)
-			? (VRMainRProjZ / VRSubRProjZ) * ((float)VRSubX / (float)VRMainX) : 1.0f;
-		float hmSX = menuUp ? menuMeshScale : (VRScaleHudMeshes ? VRHudScaleX : 1.0f);
-		float hmSY = menuUp ? menuMeshScale : (VRScaleHudMeshes ? VRHudScaleY : 1.0f);
-		mat4 hudMeshProj = monoProj * mat4::scale(hmSX, hmSY, 1.0f);
 		SetupSceneTargetMirror(ew, eh); // 1-sample into PPImage[0]: no MSAA, no resolve, no bloom
-		// Mirror: all scene batches (no cursor) with the plain mono projection, except the
-		// flash quad (already clip-space) and HUD meshes (scaled), same depth clears.
+		// Mirror: all scene batches (no cursor) with the plain mono projection, except the flash
+		// quad (already clip-space) and HUD meshes (each its own per-batch view-space scale, like
+		// the eye path; monoProj is symmetric so the scale order is cosmetic), same depth clears.
 		for (size_t j = 0; j < sceneBatches; )
 		{
 			int pt = QueuedBatches[j].VRProj;
 			size_t k = j;
 			while (k < sceneBatches && QueuedBatches[k].VRProj == pt)
 				k++;
-			DrawSceneWithClears((pt == VRPROJ_FLASH) ? flashProj : (pt == VRPROJ_HUDMESH) ? hudMeshProj : monoProj, j, k);
+			if (pt == VRPROJ_HUDMESH)
+			{
+				for (size_t m = j; m < k; m++)
+					DrawSceneWithClears(monoProj * mat4::scale(QueuedBatches[m].VRMeshSX, QueuedBatches[m].VRMeshSY, 1.0f), m, m + 1);
+				j = k;
+				continue;
+			}
+			DrawSceneWithClears((pt == VRPROJ_FLASH) ? flashProj : monoProj, j, k);
 			j = k;
 		}
 	}
@@ -4535,6 +4575,8 @@ void UD3D11RenderDevice::RenderVREyes()
 	VRClearZAt.clear();
 	VRHudStart = -1;
 	VRCurProj = VRPROJ_WORLD;
+	VRCurMeshSX = 1.0f;
+	VRCurMeshSY = 1.0f;
 	VRHudMeshArm = false;
 
 	unguard;
