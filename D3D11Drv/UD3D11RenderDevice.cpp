@@ -80,7 +80,7 @@ void UD3D11RenderDevice::StaticConstructor()
 	UseVR = 0; // opt-in (VR users are rare). Once on, the Init probe auto-detects the headset (else mono).
 	VRWorldScale = 52.5f;
 	VRHudDepth = 150.0f;
-	VRHudDepthBottom = 0.0f; // disabled by default (bottom zone uses VRHudDepth)
+	VRHudDepthBottom = 30.0f;
 	VRHudBottomY = 0.7f;
 	VRUIDepth = 150.0f;
 	VRCrosshairDepth = 150.0f;
@@ -2614,22 +2614,33 @@ void UD3D11RenderDevice::DrawGouraudPolygon(FSceneNode* Frame, FTextureInfo& Inf
 
 	if (VRRetaining)
 	{
-		if (VRHudMeshArm || VRInSubView)
+		// HUD mesh. Two very different cases must not be confused:
+		//  - Menu player-mesh preview (UMenuPlayerMeshClient): a narrow-FOV sub-view, NOT a render
+		//    overlay. Magnify to fill the virtual screen like the 2D render.
+		//  - Mod radar icon: a render overlay (RenderOverlays -> HACKFLAGS_NoNearZ) at the game FOV,
+		//    scaled by VRScaleHudMeshes via the ClearZ arm (VRHudMeshArm). MUST stay on that path.
+		// So the preview is "sub-view AND not an overlay AND narrow FOV"; a NoNearZ overlay is never a
+		// preview even if DrawClippedActor made it a sub-view.
+		bool noNearZ = (GUglyHackFlags & HACKFLAGS_NoNearZ) != 0;
+		bool preview = VRInSubView && !noNearZ && VRSubRProjZ > 0.0f && VRSubRProjZ < VRMainRProjZ * 0.9f;
+		if (preview || VRHudMeshArm)
 		{
-			// HUD mesh: menu preview sub-view (magnify to fill the virtual screen like the 2D
-			// render — FOV ratio * width fraction, this sub-view's own numbers) or a mod radar
-			// icon (VRHudScale). Per-batch so each preview keeps its own size.
 			float sx, sy;
-			if (VRInSubView)
+			if (preview) // menu player-mesh preview: magnify to fill like the 2D render
 			{
-				float s = (VRSubRProjZ > 0.0f && VRMainX > 0) ? (VRMainRProjZ / VRSubRProjZ) * ((float)VRSubX / (float)VRMainX) : 1.0f;
+				float s = (VRMainX > 0) ? (VRMainRProjZ / VRSubRProjZ) * ((float)VRSubX / (float)VRMainX) : 1.0f;
 				sx = s; sy = s;
 			}
-			else { sx = VRHudScaleX; sy = VRHudScaleY; }
+			else // radar HUD mesh (VRHudMeshArm implies VRScaleHudMeshes): scale IN-GAME only, same as
+			{    // the HUD tile scaling — a menu up (mouse shown) leaves the icons at their real size.
+				bool inGame = Viewport && !Viewport->bShowWindowsMouse;
+				sx = inGame ? VRHudScaleX : 1.0f;
+				sy = inGame ? VRHudScaleY : 1.0f;
+			}
 			VRSetMeshProj(sx, sy);
 		}
 		else
-			VRSetProj((GUglyHackFlags & HACKFLAGS_NoNearZ) ? VRPROJ_WEAPON : VRIsSkyFrame(Frame) ? VRPROJ_SKY : VRPROJ_WORLD);
+			VRSetProj(noNearZ ? VRPROJ_WEAPON : VRIsSkyFrame(Frame) ? VRPROJ_SKY : VRPROJ_WORLD);
 		VRBeginPostRender();
 	}
 
@@ -2795,22 +2806,33 @@ void UD3D11RenderDevice::DrawGouraudTriangles(const FSceneNode* Frame, const FTe
 
 	if (VRRetaining)
 	{
-		if (VRHudMeshArm || VRInSubView)
+		// HUD mesh. Two very different cases must not be confused:
+		//  - Menu player-mesh preview (UMenuPlayerMeshClient): a narrow-FOV sub-view, NOT a render
+		//    overlay. Magnify to fill the virtual screen like the 2D render.
+		//  - Mod radar icon: a render overlay (RenderOverlays -> HACKFLAGS_NoNearZ) at the game FOV,
+		//    scaled by VRScaleHudMeshes via the ClearZ arm (VRHudMeshArm). MUST stay on that path.
+		// So the preview is "sub-view AND not an overlay AND narrow FOV"; a NoNearZ overlay is never a
+		// preview even if DrawClippedActor made it a sub-view.
+		bool noNearZ = (GUglyHackFlags & HACKFLAGS_NoNearZ) != 0;
+		bool preview = VRInSubView && !noNearZ && VRSubRProjZ > 0.0f && VRSubRProjZ < VRMainRProjZ * 0.9f;
+		if (preview || VRHudMeshArm)
 		{
-			// HUD mesh: menu preview sub-view (magnify to fill the virtual screen like the 2D
-			// render — FOV ratio * width fraction, this sub-view's own numbers) or a mod radar
-			// icon (VRHudScale). Per-batch so each preview keeps its own size.
 			float sx, sy;
-			if (VRInSubView)
+			if (preview) // menu player-mesh preview: magnify to fill like the 2D render
 			{
-				float s = (VRSubRProjZ > 0.0f && VRMainX > 0) ? (VRMainRProjZ / VRSubRProjZ) * ((float)VRSubX / (float)VRMainX) : 1.0f;
+				float s = (VRMainX > 0) ? (VRMainRProjZ / VRSubRProjZ) * ((float)VRSubX / (float)VRMainX) : 1.0f;
 				sx = s; sy = s;
 			}
-			else { sx = VRHudScaleX; sy = VRHudScaleY; }
+			else // radar HUD mesh (VRHudMeshArm implies VRScaleHudMeshes): scale IN-GAME only, same as
+			{    // the HUD tile scaling — a menu up (mouse shown) leaves the icons at their real size.
+				bool inGame = Viewport && !Viewport->bShowWindowsMouse;
+				sx = inGame ? VRHudScaleX : 1.0f;
+				sy = inGame ? VRHudScaleY : 1.0f;
+			}
 			VRSetMeshProj(sx, sy);
 		}
 		else
-			VRSetProj((GUglyHackFlags & HACKFLAGS_NoNearZ) ? VRPROJ_WEAPON : VRIsSkyFrame(Frame) ? VRPROJ_SKY : VRPROJ_WORLD);
+			VRSetProj(noNearZ ? VRPROJ_WEAPON : VRIsSkyFrame(Frame) ? VRPROJ_SKY : VRPROJ_WORLD);
 		VRBeginPostRender();
 	}
 
