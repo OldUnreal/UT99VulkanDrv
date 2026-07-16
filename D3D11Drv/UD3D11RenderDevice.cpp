@@ -1825,6 +1825,8 @@ void UD3D11RenderDevice::Lock(FPlane InFlashScale, FPlane InFlashFog, FPlane Scr
 {
 	guard(UD3D11RenderDevice::Lock);
 
+	VRMainCaptured = false; // recapture the main scene node's FOV this frame
+
 	Timers.DrawBatches.Reset();
 	Timers.DrawComplexSurface.Reset();
 	Timers.DrawGouraudPolygon.Reset();
@@ -3707,6 +3709,19 @@ void UD3D11RenderDevice::SetSceneNode(FSceneNode* Frame)
 	CurrentFrame = Frame;
 	Aspect = Frame->FY / Frame->FX;
 	RProjZ = (float)appTan(radians(Viewport->Actor->FovAngle) * 0.5);
+
+	// The menu player-mesh preview (UMenuPlayerMeshClient::DrawClippedActor) mutates THIS frame's
+	// rect + FovAngle in place and never restores the FOV, poisoning every scene node afterwards
+	// (an open dropdown drawn at that leftover fov=30 would bake shrunk). Bake RFX2/RFY2 and the
+	// replay zoom off the MAIN (first) node's FOV so the per-tile FOV cancels against the zoom —
+	// the HUD stays put whatever the leftover FOV, same as the mono mirror's zoom compensation.
+	if (!VRMainCaptured)
+	{
+		VRMainRProjZ = RProjZ;
+		VRMainCaptured = true;
+	}
+	if (VRRetaining)
+		RProjZ = VRMainRProjZ; // ignore a poisoned leftover FOV for HUD baking (mono frustum below is unused in retain)
 	RFX2 = 2.0f * RProjZ / Frame->FX;
 	RFY2 = 2.0f * RProjZ * Aspect / Frame->FY;
 
@@ -4269,14 +4284,15 @@ void UD3D11RenderDevice::RenderVREyes()
 
 	// Weapon zoom (sniper etc.): the game shrinks FovAngle to magnify. We keep the
 	// fixed XR eye FOV, so reproduce the magnification by scaling the eye projection
-	// by tan(DefaultFOV/2)/tan(FovAngle/2). RProjZ already = tan(FovAngle/2) (SetSceneNode).
+	// by tan(DefaultFOV/2)/tan(FovAngle/2). VRMainRProjZ = tan(main FovAngle/2) — the MAIN
+	// scene node, not a leftover sub-view FOV (DrawClippedActor menu preview never restores it).
 	// Scaling clip.xy also cancels the FOV-driven narrowing of HUD tiles (RFX2), so the
 	// HUD stays put — same net behaviour as the mono desktop mirror.
 	float defFov = 90.0f;
 	if (Viewport && Viewport->Actor && Viewport->Actor->DefaultFOV > 1.0f)
 		defFov = Viewport->Actor->DefaultFOV;
 	float rprojDefault = (float)appTan(radians(defFov) * 0.5);
-	float zoom = (RProjZ > 0.0001f) ? (rprojDefault / RProjZ) : 1.0f;
+	float zoom = (VRMainRProjZ > 0.0001f) ? (rprojDefault / VRMainRProjZ) : 1.0f;
 	if (zoom < 1.0f)
 		zoom = 1.0f;
 
@@ -4435,7 +4451,7 @@ void UD3D11RenderDevice::RenderVREyes()
 	bool mirror = VRWantMirror();
 	if (CurrentFrame && mirror)
 	{
-		float rprojz = (float)appTan(radians(Viewport->Actor->FovAngle) * 0.5);
+		float rprojz = VRMainRProjZ; // main scene node FOV, not the leftover sub-view FOV
 		float aspect = CurrentFrame->FY / CurrentFrame->FX;
 		mat4 monoProj = mat4::frustum(-rprojz, rprojz, -aspect * rprojz, aspect * rprojz, 1.0f, 32768.0f, handedness::left, clipzrange::zero_positive_w);
 		mat4 flashProj = mat4::identity();

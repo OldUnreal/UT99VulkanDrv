@@ -381,6 +381,8 @@ private:
 	enum { VRPROJ_WORLD = 0, VRPROJ_WEAPON, VRPROJ_CROSSHAIR, VRPROJ_HUDOVERLAY, VRPROJ_SKY, VRPROJ_FLASH, VRPROJ_HUDMESH };
 	int VRCurProj = 0;             // projection tag for the batch currently accumulating
 	bool VRHudMeshArm = false;     // a HUD-phase ClearZ armed the next Gouraud as a HUD mesh (VRScaleHudMeshes)
+	float VRMainRProjZ = 1.0f;     // main (first) scene node's tan(FovAngle/2) — replay + HUD baking use THIS, not a poisoned leftover sub-view FOV (menu player-mesh preview)
+	bool VRMainCaptured = false;   // main scene node captured this frame (reset each Lock)
 	ID3D11DepthStencilView* VRReplayDepth = nullptr; // depth view the current replay clears (eyes: MSAA; mirror: 1-sample)
 	int VRDropped = 0;             // primitives dropped this window because the VR buffer was full
 	DOUBLE VRLastDropLog = 0.0;    // appSecondsNew() of the last overflow report (throttle)
