@@ -711,23 +711,20 @@ bool UD3D11RenderDevice::UpdateSwapChain(bool resizeSceneBuffers)
 	if (DxgiSwapChainAllowTearing)
 		flags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
 
-	// SBS record mode (VRMirrorMode 4): size the backbuffer to both eyes at full eye resolution,
-	// independent of the window — DXGI_SCALING_STRETCH shrinks it into the window for preview,
-	// while game recorders that hook Present (Bandicam game mode, OBS game capture) grab the
-	// backbuffer at its native size, giving a full-res side-by-side 3D video. Not with HDR: the
-	// SBS blit is a raw copy from the RGBA8 eye images, incompatible with an RGBA16F backbuffer
-	// (mode 4 then falls back to a plain always-on mirror).
+	// SBS record mode (VRMirrorMode 4): size the backbuffer to both eye screen-crops side by
+	// side at full eye resolution, independent of the window — DXGI_SCALING_STRETCH shrinks it
+	// into the window for preview, while game recorders that hook Present (Bandicam game mode,
+	// OBS game capture) grab the backbuffer at its native size, giving a full-res side-by-side
+	// 3D video. The wanted size comes from RenderVREyes (the crop depends on the eye projection;
+	// zero until the first VR frame). Not with HDR: the SBS blit is a raw copy from the RGBA8
+	// eye images, incompatible with an RGBA16F backbuffer (mode 4 then falls back to a plain
+	// always-on mirror).
 	BackBufferSizeX = CurrentSizeX;
 	BackBufferSizeY = CurrentSizeY;
-	if (VR && VRMirrorMode == 4 && !ActiveHdr)
+	if (VR && VRMirrorMode == 4 && !ActiveHdr && VRSBSSizeX > 0 && VRSBSSizeY > 0)
 	{
-		uint32_t ew = 0, eh = 0;
-		VR->GetEyeResolution(ew, eh);
-		if (ew && eh)
-		{
-			BackBufferSizeX = (int)(ew * 2);
-			BackBufferSizeY = (int)eh;
-		}
+		BackBufferSizeX = VRSBSSizeX;
+		BackBufferSizeY = VRSBSSizeY;
 	}
 
 	debugf(TEXT("D3D11Drv: Updating SwapChain size to %d x %d"), BackBufferSizeX, BackBufferSizeY);
@@ -4215,6 +4212,12 @@ void UD3D11RenderDevice::InjectVRScreenFrame()
 	float xB = xE * 4.0f;
 	float yB = yE * 4.0f;
 
+	// Capture the hole (= the visible screen edge) for the SBS-record crop: it measures where
+	// THESE exact vertices land through the exact replay matrices, instead of re-deriving them.
+	VRHoleX = xE;
+	VRHoleY = yE;
+	VRHoleZ = Z;
+
 	SetPipeline(PF_Highlighted);
 	SetDescriptorSet(0);
 
@@ -4404,6 +4407,22 @@ bool UD3D11RenderDevice::VRWantMirror()
 	return !VRWorn || (VRMirrorMode == 2 && menu);
 }
 
+// Project a view-space point through a projection matrix to pixel coordinates (top-left origin).
+// Used to find the virtual-screen rectangle inside an eye image for the SBS-record crop: the same
+// numeric path the GPU takes, so no hand-derived NDC formulas to get sign conventions wrong in.
+static void VRProjectToPixel(const mat4& P, float x, float y, float z, float ew, float eh, float& px, float& py)
+{
+	float cx = P[0] * x + P[4] * y + P[8] * z + P[12];
+	float cy = P[1] * x + P[5] * y + P[9] * z + P[13];
+	float cw = P[3] * x + P[7] * y + P[11] * z + P[15];
+	if (cw == 0.0f) cw = 1.0f;
+	px = (cx / cw * 0.5f + 0.5f) * ew;
+	// Eye texture rows run TOP-DOWN opposite to clip-space y (the present pass flips Y): verified
+	// by pixel scan (measured border top 325 == eh - projected 637). So NDC.y -> texture row is
+	// (y*0.5+0.5), NOT (0.5-y*0.5). X is not flipped (measured left/right matched).
+	py = (cy / cw * 0.5f + 0.5f) * eh;
+}
+
 void UD3D11RenderDevice::RenderVREyes()
 {
 	guard(UD3D11RenderDevice::RenderVREyes);
@@ -4431,19 +4450,7 @@ void UD3D11RenderDevice::RenderVREyes()
 	VR->GetEyeResolution(ew, eh);
 	float scale = VRWorldScale;
 
-	// SBS record mode: keep the backbuffer at 2*eye size (see UpdateSwapChain). Checked here
-	// because the mode can be toggled at runtime and the eye resolution isn't known at the
-	// initial SetRes — resize once when the desired size changes, cheap compare otherwise.
 	bool sbs = VRMirrorMode == 4 && !ActiveHdr && ew && eh;
-	{
-		int wantW = sbs ? (int)(ew * 2) : CurrentSizeX;
-		int wantH = sbs ? (int)eh : CurrentSizeY;
-		if (BackBufferSizeX != wantW || BackBufferSizeY != wantH)
-		{
-			ReleaseSwapChainResources();
-			UpdateSwapChain(false); // swapchain only — the scene buffers are eye-sized mid-frame
-		}
-	}
 
 	// Weapon zoom (sniper etc.): the game shrinks FovAngle to magnify. We keep the
 	// fixed XR eye FOV, so reproduce the magnification by scaling the eye projection
@@ -4458,6 +4465,22 @@ void UD3D11RenderDevice::RenderVREyes()
 	float zoom = (VRMainRProjZ > 0.0001f) ? (rprojDefault / VRMainRProjZ) : 1.0f;
 	if (zoom < 1.0f)
 		zoom = 1.0f;
+
+	// SBS record: keep the backbuffer at the wanted SBS size (2 x per-eye screen crop, measured
+	// last frame in the block after the eye loop — the crop needs both eyes and is measured from
+	// the rendered border, not modelled). Zero until the first measured frame (no copy that
+	// frame). See UpdateSwapChain, which reads VRSBSSize. Resize only on a size change; cheap
+	// compare otherwise (the mode can be toggled and eye resolution isn't known at SetRes).
+	{
+		int wantW = (sbs && VRSBSSizeX > 0) ? VRSBSSizeX : CurrentSizeX;
+		int wantH = (sbs && VRSBSSizeY > 0) ? VRSBSSizeY : CurrentSizeY;
+		if (BackBufferSizeX != wantW || BackBufferSizeY != wantH)
+		{
+			ReleaseSwapChainResources();
+			UpdateSwapChain(false); // swapchain only — the scene buffers are eye-sized mid-frame
+		}
+	}
+	float sbsRects[2][4] = {}; // per eye this frame: left/top/width/height of the screen rect in eye pixels
 
 	// Head-look. The whole rendered frame is a virtual screen; rotate it by the head
 	// orientation. Recenter reference on console request or when leaving a menu.
@@ -4481,37 +4504,7 @@ void UD3D11RenderDevice::RenderVREyes()
 		vec4 dq = VRQuatMul(headNow, VRQuatConj(VRHeadRef));
 		mat4 headRot = mat4::quaternion(dq.x, -dq.y, -dq.z, dq.w);
 
-		if (sbs)
-		{
-			// SBS record: the recorded frames must never tilt — two rolled eye views are
-			// unwatchable as 3D video. Gameplay gets NO head-look at all (level, static
-			// recording; the gameplay compensation is roll-only anyway). The menu keeps
-			// yaw/pitch look-around (corner UI is unreachable otherwise) with the roll
-			// REMOVED: rebuild the head basis from its forward axis and the level up axis
-			// (+y is DOWN in view space), so up on screen stays up.
-			if (menuUp)
-			{
-				// The head basis's own up column is +y at rest (headRot == identity), so the
-				// level up for the REBUILT basis is +y too — even though +y points down on
-				// screen; what matters is reproducing headRot's convention without its roll.
-				vec3 fwd = normalize(vec3(headRot[8], headRot[9], headRot[10]));
-				vec3 upLevel(0.0f, 1.0f, 0.0f);
-				vec3 right = cross(upLevel, fwd);
-				float rlen = length(right);
-				if (rlen > 0.001f)
-				{
-					right = right / rlen;
-					vec3 up = cross(fwd, right);
-					// Inverse (transpose) of the no-roll head basis: rows = right/up/fwd.
-					lookInv[0] = right.x; lookInv[4] = right.y; lookInv[8]  = right.z;
-					lookInv[1] = up.x;    lookInv[5] = up.y;    lookInv[9]  = up.z;
-					lookInv[2] = fwd.x;   lookInv[6] = fwd.y;   lookInv[10] = fwd.z;
-				}
-				else
-					lookInv = mat4::transpose(headRot); // looking straight up/down: roll undefined, momentary
-			}
-		}
-		else if (menuUp)
+		if (menuUp)
 		{
 			// Menu: full head orientation, so corner UI can be looked at.
 			lookInv = mat4::transpose(headRot);
@@ -4560,6 +4553,8 @@ void UD3D11RenderDevice::RenderVREyes()
 		// image so world/HUD/crosshair move together — the crosshair keeps marking the
 		// true aim point. clip.y += panY*clip.w  =>  NDC.y += panY for every vertex.
 		// Fixed scale (NOT /VRHudDepth) so VRHudDepth only controls HUD depth/convergence.
+		// Never altered by the SBS record mode — the wearer's view is sacred; the recording
+		// crops what the eyes actually rendered and nothing more.
 		float panY = -VRHeightOffset / 150.0f;
 		eyeProj[1]  += panY * eyeProj[3];
 		eyeProj[5]  += panY * eyeProj[7];
@@ -4569,6 +4564,26 @@ void UD3D11RenderDevice::RenderVREyes()
 		// Head-look rotates the whole virtual screen (world, sky and HUD together).
 		mat4 worldProj = eyeProj * eyeView * lookInv;
 		mat4 skyProj = eyeProj * lookInv;
+
+		// SBS record: measure where the screen frame actually lands in this eye — the captured
+		// hole vertices through the same worldProj the replay draws them with. Project all 4
+		// corners (TL,TR,BL,BR in view space) so any roll/skew shows up, not just a 2-corner box.
+		if (sbs && VRHoleX > 0.0f)
+		{
+			float c[8];
+			VRProjectToPixel(worldProj, -VRHoleX,  VRHoleY, VRHoleZ, (float)ew, (float)eh, c[0], c[1]); // TL
+			VRProjectToPixel(worldProj,  VRHoleX,  VRHoleY, VRHoleZ, (float)ew, (float)eh, c[2], c[3]); // TR
+			VRProjectToPixel(worldProj, -VRHoleX, -VRHoleY, VRHoleZ, (float)ew, (float)eh, c[4], c[5]); // BL
+			VRProjectToPixel(worldProj,  VRHoleX, -VRHoleY, VRHoleZ, (float)ew, (float)eh, c[6], c[7]); // BR
+			float minx = Min(Min(c[0], c[2]), Min(c[4], c[6]));
+			float maxx = Max(Max(c[0], c[2]), Max(c[4], c[6]));
+			float miny = Min(Min(c[1], c[3]), Min(c[5], c[7]));
+			float maxy = Max(Max(c[1], c[3]), Max(c[5], c[7]));
+			sbsRects[eye][0] = minx;
+			sbsRects[eye][1] = miny;
+			sbsRects[eye][2] = maxx - minx;
+			sbsRects[eye][3] = maxy - miny;
+		}
 		// Weapon: reduced IPD so the first-person weapon doesn't sit in your nose.
 		// The 0.1 factor keeps the config in a friendly range (1.0 ~= 10% IPD).
 		float weaponIpd = scale * invZoom * VRWeaponIPDScale * 0.1f;
@@ -4638,15 +4653,67 @@ void UD3D11RenderDevice::RenderVREyes()
 			if (SUCCEEDED(hr))
 			{
 				RunPresentPass(rtv, ew, eh, VRBrightnessScale, VRBrightnessOffset); // HMD brightness override
-				// SBS record: raw-copy the finished eye into its half of the oversized backbuffer
-				// (same RGBA8 typeless family, bits already gamma-encoded). Recorders hooking
-				// Present grab it at full size; the window just shows a shrunk preview.
-				if (sbs && BackBuffer && BackBufferSizeX == (int)(ew * 2) && BackBufferSizeY == (int)eh)
-					Context->CopySubresourceRegion(BackBuffer, 0, eye * ew, 0, 0, image, 0, nullptr);
+
+				// SBS record: raw-copy this eye's slice of the common visible screen region into
+				// its half of the backbuffer (same RGBA8 typeless family, bits already gamma-
+				// encoded). Position from THIS frame's measured rect; sizes/fractions from the
+				// last measured frame (needs both eyes — one frame of lag, static per session).
+				// The slice starts at the same screen fraction in both eyes, so the stereo pair
+				// aligns. Recorders hooking Present grab the backbuffer at full size; the
+				// window just shows a shrunk preview.
+				if (sbs && BackBuffer && VRSbsCropW > 0 && sbsRects[eye][2] > 1.0f &&
+					BackBufferSizeX == VRSbsCropW * 2 && BackBufferSizeY == VRSbsCropH)
+				{
+					D3D11_BOX box = {};
+					box.left = (UINT)Clamp((int)(sbsRects[eye][0] + VRSbsF0X * sbsRects[eye][2]), 0, (int)ew - VRSbsCropW);
+					box.top = (UINT)Clamp((int)(sbsRects[eye][1] + VRSbsF0Y * sbsRects[eye][3]), 0, (int)eh - VRSbsCropH);
+					box.right = box.left + VRSbsCropW;
+					box.bottom = box.top + VRSbsCropH;
+					box.front = 0;
+					box.back = 1;
+					Context->CopySubresourceRegion(BackBuffer, 0, eye * VRSbsCropW, 0, 0, image, 0, &box);
+				}
 			}
 			else
 				debugf(TEXT("D3D11Drv VR: CreateRenderTargetView(eye) failed 0x%08x"), (unsigned)hr);
 			VR->EndEye(eye);
+		}
+	}
+
+	// SBS record: derive next frame's crop from this frame's measured screen rects — the common
+	// visible fraction across BOTH eyes (same screen region per eye or the stereo pair wouldn't
+	// align), intersected with the eye images (the off-FOV part of the screen was never
+	// rendered). Sizes freeze while a menu is up: look-around perspective would jitter them,
+	// and resizing the backbuffer restarts recorders. Positions/fractions always track.
+	if (sbs && sbsRects[0][2] > 1.0f && sbsRects[1][2] > 1.0f)
+	{
+		// Common visible fraction of the screen rect across both eyes, intersected with the eye
+		// image [0,ew]x[0,eh]. Plain intersection — measured, not modelled.
+		float f0x = 0.0f, f0y = 0.0f, f1x = 1.0f, f1y = 1.0f;
+		for (int e = 0; e < 2; e++)
+		{
+			f0x = Max(f0x, -sbsRects[e][0] / sbsRects[e][2]);
+			f0y = Max(f0y, -sbsRects[e][1] / sbsRects[e][3]);
+			f1x = Min(f1x, ((float)ew - sbsRects[e][0]) / sbsRects[e][2]);
+			f1y = Min(f1y, ((float)eh - sbsRects[e][1]) / sbsRects[e][3]);
+		}
+		f0x = Clamp(f0x, 0.0f, 1.0f);
+		f0y = Clamp(f0y, 0.0f, 1.0f);
+		f1x = Clamp(f1x, f0x, 1.0f);
+		f1y = Clamp(f1y, f0y, 1.0f);
+		int cw = Min((int)(sbsRects[0][2] * (f1x - f0x)) & ~1, (int)ew);
+		int ch = Min((int)(sbsRects[0][3] * (f1y - f0y)) & ~1, (int)eh);
+		if (cw >= 16 && ch >= 16)
+		{
+			VRSbsF0X = f0x;
+			VRSbsF0Y = f0y;
+			if (!menuUp || VRSbsCropW == 0)
+			{
+				VRSbsCropW = cw;
+				VRSbsCropH = ch;
+				VRSBSSizeX = cw * 2;
+				VRSBSSizeY = ch;
+			}
 		}
 	}
 
@@ -4699,8 +4766,10 @@ void UD3D11RenderDevice::RenderVREyes()
 	// record mode the backbuffer already holds the two copied eyes — just present it.
 	if (mirror || sbs)
 	{
+		// Mono mirror present fills the whole backbuffer (== window here; mirror never runs in SBS
+		// mode, where the eye copies already own the backbuffer and we just present it).
 		if (mirror)
-			RunPresentPass(BackBufferView, CurrentSizeX, CurrentSizeY, 1.0f, 0.0f, false, true);
+			RunPresentPass(BackBufferView, BackBufferSizeX, BackBufferSizeY, 1.0f, 0.0f, false, true);
 		if (SwapChain1)
 		{
 			DXGI_PRESENT_PARAMETERS presentParams = {};
