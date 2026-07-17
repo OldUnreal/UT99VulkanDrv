@@ -113,6 +113,7 @@ public:
 	ComPtr<ID3D11InfoQueue> InfoQueue;
 	ComPtr<ID3D11Texture2D> BackBuffer;
 	ComPtr<ID3D11RenderTargetView> BackBufferView;
+	int BackBufferSizeX = 0, BackBufferSizeY = 0; // actual swapchain size; differs from CurrentSizeX/Y in VR SBS-record mode (VRMirrorMode 4)
 	bool DxgiSwapChainAllowTearing = false;
 	int BufferCount = 2;
 	std::set<std::string> SeenDebugMessages;
@@ -283,7 +284,7 @@ public:
 	FLOAT VRWeaponIPDScale; // stereo separation for the first-person weapon (HACKFLAGS_NoNearZ); <1 pulls it out of your nose
 	FLOAT VRBrightnessScale;  // HMD eye brightness = game brightness * scale + offset (eye only; mirror keeps the game's)
 	FLOAT VRBrightnessOffset;
-	BYTE VRMirrorMode;        // desktop mirror: 0=off, 1=when headset removed (default), 2=in menu, 3=always
+	BYTE VRMirrorMode;        // desktop mirror: 0=off, 1=when headset removed (default), 2=in menu, 3=always, 4=SBS record (full-res side-by-side backbuffer for game-capture recorders, head-look kept level)
 	UBOOL VRScaleHudMeshes;   // scale PostRender Gouraud meshes (e.g. mod radar icons) with the HUD, at HUD depth
 
 	struct
@@ -324,7 +325,7 @@ private:
 	void DrawComplexSurfaceFaces(const ComplexSurfaceInfo& info);
 
 	void ReleaseSwapChainResources();
-	bool UpdateSwapChain();
+	bool UpdateSwapChain(bool resizeSceneBuffers = true); // false: swapchain only (mid-VR-frame SBS resize must not touch the eye-sized scene buffers)
 	void SetColorSpace();
 	void ResizeSceneBuffers(int width, int height, int multisample);
 	void ClearTextureCache();

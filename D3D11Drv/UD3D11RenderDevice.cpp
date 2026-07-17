@@ -93,7 +93,7 @@ void UD3D11RenderDevice::StaticConstructor()
 	VRWeaponIPDScale = 1.0f;
 	VRBrightnessScale = 1.0f;
 	VRBrightnessOffset = 0.0f;
-	VRMirrorMode = 1; // 0=off, 1=when headset removed, 2=in menu, 3=always
+	VRMirrorMode = 1; // 0=off, 1=when headset removed, 2=in menu, 3=always, 4=SBS record (full-res side-by-side backbuffer for game-capture recorders)
 	VRScaleHudMeshes = 0;
 
 #if defined(OLDUNREAL469SDK)
@@ -705,15 +705,34 @@ void UD3D11RenderDevice::ReleaseSwapChainResources()
 	BackBufferView.reset();
 }
 
-bool UD3D11RenderDevice::UpdateSwapChain()
+bool UD3D11RenderDevice::UpdateSwapChain(bool resizeSceneBuffers)
 {
 	UINT flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
 	if (DxgiSwapChainAllowTearing)
 		flags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
 
-	debugf(TEXT("D3D11Drv: Updating SwapChain size to %d x %d"), CurrentSizeX, CurrentSizeY);
+	// SBS record mode (VRMirrorMode 4): size the backbuffer to both eyes at full eye resolution,
+	// independent of the window — DXGI_SCALING_STRETCH shrinks it into the window for preview,
+	// while game recorders that hook Present (Bandicam game mode, OBS game capture) grab the
+	// backbuffer at its native size, giving a full-res side-by-side 3D video. Not with HDR: the
+	// SBS blit is a raw copy from the RGBA8 eye images, incompatible with an RGBA16F backbuffer
+	// (mode 4 then falls back to a plain always-on mirror).
+	BackBufferSizeX = CurrentSizeX;
+	BackBufferSizeY = CurrentSizeY;
+	if (VR && VRMirrorMode == 4 && !ActiveHdr)
+	{
+		uint32_t ew = 0, eh = 0;
+		VR->GetEyeResolution(ew, eh);
+		if (ew && eh)
+		{
+			BackBufferSizeX = (int)(ew * 2);
+			BackBufferSizeY = (int)eh;
+		}
+	}
 
-	HRESULT result = SwapChain->ResizeBuffers(BufferCount, CurrentSizeX, CurrentSizeY, ActiveHdr ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R8G8B8A8_UNORM, flags);
+	debugf(TEXT("D3D11Drv: Updating SwapChain size to %d x %d"), BackBufferSizeX, BackBufferSizeY);
+
+	HRESULT result = SwapChain->ResizeBuffers(BufferCount, BackBufferSizeX, BackBufferSizeY, ActiveHdr ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R8G8B8A8_UNORM, flags);
 	if (FAILED(result))
 	{
 		return false;
@@ -721,7 +740,7 @@ bool UD3D11RenderDevice::UpdateSwapChain()
 
 	SetColorSpace();
 
-	if (CurrentSizeX && CurrentSizeY)
+	if (resizeSceneBuffers && CurrentSizeX && CurrentSizeY)
 	{
 		try
 		{
@@ -2109,6 +2128,14 @@ void UD3D11RenderDevice::Unlock(UBOOL Blit)
 		viewport.Width = CurrentSizeX;
 		viewport.Height = CurrentSizeY;
 		viewport.MaxDepth = 1.0f;
+		// VR SBS-record mode leaves the backbuffer larger than the window (see UpdateSwapChain);
+		// when this fallback present runs (VR session not rendering), it must fill the whole
+		// backbuffer or the picture lands squeezed in its top-left corner.
+		if (VR && BackBufferSizeX > 0 && (BackBufferSizeX != CurrentSizeX || BackBufferSizeY != CurrentSizeY))
+		{
+			viewport.Width = (FLOAT)BackBufferSizeX;
+			viewport.Height = (FLOAT)BackBufferSizeY;
+		}
 		Context->RSSetViewports(1, &viewport);
 
 		PresentPushConstants pushconstants = GetPresentPushConstants();
@@ -4352,9 +4379,10 @@ void UD3D11RenderDevice::DrawVRCursor()
 // each eye into its OpenXR swapchain image, then render a FLAT mono view for the
 // desktop mirror so on-screen text is readable and mouse hit-testing lines up.
 // Should the flat desktop mirror render this frame? VRMirrorMode: 0=off, 1=only when the
-// headset is removed (default), 2=also in menu (mouse free), 3=always. The headset-worn poll
-// (VR->IsWorn(), which combines session focus + user presence) is throttled to ~once a second
-// so these checks never cost per-frame — the mirror decision itself is a couple of bools.
+// headset is removed (default), 2=also in menu (mouse free), 3=always, 4=SBS record (no mono
+// replay — handled separately in RenderVREyes; >=3 here doubles as its HDR fallback). The
+// headset-worn poll (VR->IsWorn(), which combines session focus + user presence) is throttled
+// to ~once a second so these checks never cost per-frame.
 bool UD3D11RenderDevice::VRWantMirror()
 {
 	if (VRMirrorMode == 0)
@@ -4403,6 +4431,20 @@ void UD3D11RenderDevice::RenderVREyes()
 	VR->GetEyeResolution(ew, eh);
 	float scale = VRWorldScale;
 
+	// SBS record mode: keep the backbuffer at 2*eye size (see UpdateSwapChain). Checked here
+	// because the mode can be toggled at runtime and the eye resolution isn't known at the
+	// initial SetRes — resize once when the desired size changes, cheap compare otherwise.
+	bool sbs = VRMirrorMode == 4 && !ActiveHdr && ew && eh;
+	{
+		int wantW = sbs ? (int)(ew * 2) : CurrentSizeX;
+		int wantH = sbs ? (int)eh : CurrentSizeY;
+		if (BackBufferSizeX != wantW || BackBufferSizeY != wantH)
+		{
+			ReleaseSwapChainResources();
+			UpdateSwapChain(false); // swapchain only — the scene buffers are eye-sized mid-frame
+		}
+	}
+
 	// Weapon zoom (sniper etc.): the game shrinks FovAngle to magnify. We keep the
 	// fixed XR eye FOV, so reproduce the magnification by scaling the eye projection
 	// by tan(DefaultFOV/2)/tan(FovAngle/2). VRMainRProjZ = tan(main FovAngle/2) — the MAIN
@@ -4439,7 +4481,37 @@ void UD3D11RenderDevice::RenderVREyes()
 		vec4 dq = VRQuatMul(headNow, VRQuatConj(VRHeadRef));
 		mat4 headRot = mat4::quaternion(dq.x, -dq.y, -dq.z, dq.w);
 
-		if (menuUp)
+		if (sbs)
+		{
+			// SBS record: the recorded frames must never tilt — two rolled eye views are
+			// unwatchable as 3D video. Gameplay gets NO head-look at all (level, static
+			// recording; the gameplay compensation is roll-only anyway). The menu keeps
+			// yaw/pitch look-around (corner UI is unreachable otherwise) with the roll
+			// REMOVED: rebuild the head basis from its forward axis and the level up axis
+			// (+y is DOWN in view space), so up on screen stays up.
+			if (menuUp)
+			{
+				// The head basis's own up column is +y at rest (headRot == identity), so the
+				// level up for the REBUILT basis is +y too — even though +y points down on
+				// screen; what matters is reproducing headRot's convention without its roll.
+				vec3 fwd = normalize(vec3(headRot[8], headRot[9], headRot[10]));
+				vec3 upLevel(0.0f, 1.0f, 0.0f);
+				vec3 right = cross(upLevel, fwd);
+				float rlen = length(right);
+				if (rlen > 0.001f)
+				{
+					right = right / rlen;
+					vec3 up = cross(fwd, right);
+					// Inverse (transpose) of the no-roll head basis: rows = right/up/fwd.
+					lookInv[0] = right.x; lookInv[4] = right.y; lookInv[8]  = right.z;
+					lookInv[1] = up.x;    lookInv[5] = up.y;    lookInv[9]  = up.z;
+					lookInv[2] = fwd.x;   lookInv[6] = fwd.y;   lookInv[10] = fwd.z;
+				}
+				else
+					lookInv = mat4::transpose(headRot); // looking straight up/down: roll undefined, momentary
+			}
+		}
+		else if (menuUp)
 		{
 			// Menu: full head orientation, so corner UI can be looked at.
 			lookInv = mat4::transpose(headRot);
@@ -4564,7 +4636,14 @@ void UD3D11RenderDevice::RenderVREyes()
 			ComPtr<ID3D11RenderTargetView> rtv;
 			HRESULT hr = Device->CreateRenderTargetView(image, &rtvDesc, rtv.TypedInitPtr());
 			if (SUCCEEDED(hr))
+			{
 				RunPresentPass(rtv, ew, eh, VRBrightnessScale, VRBrightnessOffset); // HMD brightness override
+				// SBS record: raw-copy the finished eye into its half of the oversized backbuffer
+				// (same RGBA8 typeless family, bits already gamma-encoded). Recorders hooking
+				// Present grab it at full size; the window just shows a shrunk preview.
+				if (sbs && BackBuffer && BackBufferSizeX == (int)(ew * 2) && BackBufferSizeY == (int)eh)
+					Context->CopySubresourceRegion(BackBuffer, 0, eye * ew, 0, 0, image, 0, nullptr);
+			}
 			else
 				debugf(TEXT("D3D11Drv VR: CreateRenderTargetView(eye) failed 0x%08x"), (unsigned)hr);
 			VR->EndEye(eye);
@@ -4574,8 +4653,9 @@ void UD3D11RenderDevice::RenderVREyes()
 	// Flat desktop mirror: replay once more with the plain mono projection (the same frustum
 	// SetSceneNode builds), so the on-screen view matches the engine's 2D menu/mouse layout —
 	// a stereo eye view would be distorted and desync clicks. Skipped per VRMirrorMode (e.g.
-	// when the headset is worn) to save a whole replay + present.
-	bool mirror = VRWantMirror();
+	// when the headset is worn) to save a whole replay + present. SBS record mode replaces the
+	// mono replay entirely — the eyes were already copied into the backbuffer halves above.
+	bool mirror = !sbs && VRWantMirror();
 	if (CurrentFrame && mirror)
 	{
 		float rprojz = VRMainRProjZ; // main scene node FOV, not the leftover sub-view FOV
@@ -4604,19 +4684,23 @@ void UD3D11RenderDevice::RenderVREyes()
 		}
 	}
 
-	// Reset the scissor to the full window (ReplaySceneToColorBuffer left it eye-sized)
-	// so the present fills the whole window and aligns with mouse coordinates.
+	// Reset the scissor to the full backbuffer (ReplaySceneToColorBuffer left it eye-sized)
+	// so the present fills the whole window and aligns with mouse coordinates. Backbuffer size,
+	// not window size: in SBS record mode the backbuffer is larger, and this scissor also covers
+	// the next frame's present if the session stops rendering (mono fallback).
 	D3D11_RECT fullWindow = {};
-	fullWindow.right = CurrentSizeX;
-	fullWindow.bottom = CurrentSizeY;
+	fullWindow.right = (BackBufferSizeX > 0) ? BackBufferSizeX : CurrentSizeX;
+	fullWindow.bottom = (BackBufferSizeY > 0) ? BackBufferSizeY : CurrentSizeY;
 	Context->RSSetScissorRects(1, &fullWindow);
 
 	// Present the mirror to the desktop (only if we rendered it). Without vsync — the HMD's
 	// xrWaitFrame is the frame-pacing authority; blocking on the monitor vsync too would fight
-	// it. Mirror is already in PPImage[0] at 1 sample (alreadyResolved) and skips bloom.
-	if (mirror)
+	// it. Mirror is already in PPImage[0] at 1 sample (alreadyResolved) and skips bloom. In SBS
+	// record mode the backbuffer already holds the two copied eyes — just present it.
+	if (mirror || sbs)
 	{
-		RunPresentPass(BackBufferView, CurrentSizeX, CurrentSizeY, 1.0f, 0.0f, false, true);
+		if (mirror)
+			RunPresentPass(BackBufferView, CurrentSizeX, CurrentSizeY, 1.0f, 0.0f, false, true);
 		if (SwapChain1)
 		{
 			DXGI_PRESENT_PARAMETERS presentParams = {};
