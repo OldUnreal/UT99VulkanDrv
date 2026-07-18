@@ -4506,12 +4506,41 @@ void UD3D11RenderDevice::RenderVREyes()
 
 		if (menuUp)
 		{
-			// Menu: full head orientation, so corner UI can be looked at.
-			lookInv = mat4::transpose(headRot);
+			if (sbs)
+			{
+				// SBS record menu: keep yaw/pitch look-around (corner UI is unreachable
+				// otherwise) but with the roll REMOVED — the recording must stay level.
+				// Rebuild the head basis from its forward axis and the level up axis; the
+				// basis up column is +y at rest (headRot == identity), so level up is +y.
+				vec3 fwd = normalize(vec3(headRot[8], headRot[9], headRot[10]));
+				vec3 upLevel(0.0f, 1.0f, 0.0f);
+				vec3 right = cross(upLevel, fwd);
+				float rlen = length(right);
+				if (rlen > 0.001f)
+				{
+					right = right / rlen;
+					vec3 up = cross(fwd, right);
+					// Inverse (transpose) of the no-roll head basis: rows = right/up/fwd.
+					lookInv[0] = right.x; lookInv[4] = right.y; lookInv[8]  = right.z;
+					lookInv[1] = up.x;    lookInv[5] = up.y;    lookInv[9]  = up.z;
+					lookInv[2] = fwd.x;   lookInv[6] = fwd.y;   lookInv[10] = fwd.z;
+				}
+				else
+					lookInv = mat4::transpose(headRot); // straight up/down: roll undefined, momentary
+			}
+			else
+			{
+				// Menu: full head orientation, so corner UI can be looked at.
+				lookInv = mat4::transpose(headRot);
+			}
 		}
-		else
+		else if (!sbs)
 		{
-			// Gameplay: roll only (head tilt) — never reveals unrendered edges. Measure
+			// Gameplay: roll only (head tilt) — never reveals unrendered edges. NOT in SBS
+			// record mode: the counter-roll would tilt the recorded frames with every head
+			// tilt, and two rolled eye views are unwatchable as 3D video — the recording
+			// stays level (lookInv identity).
+			// Measure
 			// roll as the lean of the reference up-axis within the head's right/up basis
 			// (right.y vs up.y). This isolates roll from pitch and yaw for |pitch|<90.
 			// Near pitch +-90 both terms are cos(pitch)*{sin,cos}(roll) -> 0: roll is
@@ -4524,6 +4553,14 @@ void UD3D11RenderDevice::RenderVREyes()
 			float rollWeight = Clamp(sqrtf(rightY * rightY + upY * upY) / 0.25f, 0.0f, 1.0f);
 			lookInv = mat4::rotate(-roll * rollWeight, 0.0f, 0.0f, 1.0f);
 		}
+	}
+
+	// SBS record: clear the backbuffer so a frame whose copy is skipped (size mismatch during a
+	// resize) shows black instead of stale swapchain garbage.
+	if (sbs && BackBufferView)
+	{
+		FLOAT sbsBlack[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+		Context->ClearRenderTargetView(BackBufferView, sbsBlack);
 	}
 
 	for (int eye = 0; eye < 2; eye++)
@@ -4654,24 +4691,18 @@ void UD3D11RenderDevice::RenderVREyes()
 			{
 				RunPresentPass(rtv, ew, eh, VRBrightnessScale, VRBrightnessOffset); // HMD brightness override
 
-				// SBS record: raw-copy this eye's slice of the common visible screen region into
-				// its half of the backbuffer (same RGBA8 typeless family, bits already gamma-
-				// encoded). Position from THIS frame's measured rect; sizes/fractions from the
-				// last measured frame (needs both eyes — one frame of lag, static per session).
-				// The slice starts at the same screen fraction in both eyes, so the stereo pair
-				// aligns. Recorders hooking Present grab the backbuffer at full size; the
-				// window just shows a shrunk preview.
-				if (sbs && BackBuffer && VRSbsCropW > 0 && sbsRects[eye][2] > 1.0f &&
-					BackBufferSizeX == VRSbsCropW * 2 && BackBufferSizeY == VRSbsCropH)
+				// SBS record: copy the full eye width, cropped vertically to the screen rows
+				// (strips the letterbox black), each eye butted at the centre seam. The side
+				// eye-frame borders are already black in the eye image; the inner (nose) edge
+				// runs to the render limit — maximum kept toward the nose.
+				if (sbs && BackBuffer && VRSbsCropH > 0 && VRSbsCropW >= (int)ew &&
+					BackBufferSizeX == VRSbsCropW * 2 && BackBufferSizeY == VRSbsCropH &&
+					VRSbsSrcT + VRSbsCropH <= (int)eh)
 				{
 					D3D11_BOX box = {};
-					box.left = (UINT)Clamp((int)(sbsRects[eye][0] + VRSbsF0X * sbsRects[eye][2]), 0, (int)ew - VRSbsCropW);
-					box.top = (UINT)Clamp((int)(sbsRects[eye][1] + VRSbsF0Y * sbsRects[eye][3]), 0, (int)eh - VRSbsCropH);
-					box.right = box.left + VRSbsCropW;
-					box.bottom = box.top + VRSbsCropH;
-					box.front = 0;
-					box.back = 1;
-					Context->CopySubresourceRegion(BackBuffer, 0, eye * VRSbsCropW, 0, 0, image, 0, &box);
+					box.left = 0; box.top = (UINT)VRSbsSrcT; box.front = 0;
+					box.right = VRSbsCropW; box.bottom = (UINT)(VRSbsSrcT + VRSbsCropH); box.back = 1;
+					Context->CopySubresourceRegion(BackBuffer, 0, eye == 0 ? 0 : ((int)VRSbsCropW), 0, 0, image, 0, &box);
 				}
 			}
 			else
@@ -4680,40 +4711,25 @@ void UD3D11RenderDevice::RenderVREyes()
 		}
 	}
 
-	// SBS record: derive next frame's crop from this frame's measured screen rects — the common
-	// visible fraction across BOTH eyes (same screen region per eye or the stereo pair wouldn't
-	// align), intersected with the eye images (the off-FOV part of the screen was never
-	// rendered). Sizes freeze while a menu is up: look-around perspective would jitter them,
-	// and resizing the backbuffer restarts recorders. Positions/fractions always track.
+	// SBS record: vertical crop to the screen rows (removes the letterbox black top/bottom); the
+	// full eye width is kept as-is (the side frame border is already black — no gaps to fill, so
+	// the copy can never leave the half black). Common rows across both eyes (union, clamped to
+	// the image). Freezes while a menu is up so look-around can't thrash the backbuffer size and
+	// restart recorders.
 	if (sbs && sbsRects[0][2] > 1.0f && sbsRects[1][2] > 1.0f)
 	{
-		// Common visible fraction of the screen rect across both eyes, intersected with the eye
-		// image [0,ew]x[0,eh]. Plain intersection — measured, not modelled.
-		float f0x = 0.0f, f0y = 0.0f, f1x = 1.0f, f1y = 1.0f;
-		for (int e = 0; e < 2; e++)
+		// Intersection of rows where BOTH eyes have screen, rounded INWARD (ceil top, floor
+		// bottom) so a fractional border row can't slip in as a black line.
+		int top = (int)ceilf(Clamp(Max(sbsRects[0][1], sbsRects[1][1]), 0.0f, (float)eh));
+		int bot = (int)floorf(Clamp(Min(sbsRects[0][1] + sbsRects[0][3], sbsRects[1][1] + sbsRects[1][3]), 0.0f, (float)eh));
+		int ch = (bot - top) & ~1;
+		if (ch >= 16 && (!menuUp || VRSbsCropH == 0))
 		{
-			f0x = Max(f0x, -sbsRects[e][0] / sbsRects[e][2]);
-			f0y = Max(f0y, -sbsRects[e][1] / sbsRects[e][3]);
-			f1x = Min(f1x, ((float)ew - sbsRects[e][0]) / sbsRects[e][2]);
-			f1y = Min(f1y, ((float)eh - sbsRects[e][1]) / sbsRects[e][3]);
-		}
-		f0x = Clamp(f0x, 0.0f, 1.0f);
-		f0y = Clamp(f0y, 0.0f, 1.0f);
-		f1x = Clamp(f1x, f0x, 1.0f);
-		f1y = Clamp(f1y, f0y, 1.0f);
-		int cw = Min((int)(sbsRects[0][2] * (f1x - f0x)) & ~1, (int)ew);
-		int ch = Min((int)(sbsRects[0][3] * (f1y - f0y)) & ~1, (int)eh);
-		if (cw >= 16 && ch >= 16)
-		{
-			VRSbsF0X = f0x;
-			VRSbsF0Y = f0y;
-			if (!menuUp || VRSbsCropW == 0)
-			{
-				VRSbsCropW = cw;
-				VRSbsCropH = ch;
-				VRSBSSizeX = cw * 2;
-				VRSBSSizeY = ch;
-			}
+			VRSbsSrcT = top;
+			VRSbsCropH = ch;
+			VRSbsCropW = (int)ew;
+			VRSBSSizeX = VRSbsCropW * 2;
+			VRSBSSizeY = ch;
 		}
 	}
 

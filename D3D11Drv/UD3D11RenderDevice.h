@@ -116,8 +116,8 @@ public:
 	int BackBufferSizeX = 0, BackBufferSizeY = 0; // actual swapchain size; differs from CurrentSizeX/Y in VR SBS-record mode (VRMirrorMode 4)
 	int VRSBSSizeX = 0, VRSBSSizeY = 0; // wanted SBS backbuffer size (2 x screen crop), measured in RenderVREyes (previous frame)
 	float VRHoleX = 0.0f, VRHoleY = 0.0f, VRHoleZ = 1000.0f; // screen-frame hole half-extents captured when InjectVRScreenFrame draws it — the SBS crop measures THESE through the real replay matrices
-	int VRSbsCropW = 0, VRSbsCropH = 0;   // per-eye SBS crop size (measured; frozen while a menu is up so look-around can't resize the backbuffer)
-	float VRSbsF0X = 0.0f, VRSbsF0Y = 0.0f; // start of the common visible screen region as a fraction of the screen rect (measured)
+	int VRSbsCropW = 0, VRSbsCropH = 0;   // SBS half width (= full eye width) and vertical crop height in eye rows (screen rows only — strips the letterbox black); frozen while a menu is up
+	int VRSbsSrcT = 0;                     // top eye row of the vertical crop (screen top)
 	bool DxgiSwapChainAllowTearing = false;
 	int BufferCount = 2;
 	std::set<std::string> SeenDebugMessages;
