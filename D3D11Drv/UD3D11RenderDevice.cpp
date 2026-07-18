@@ -4723,13 +4723,22 @@ void UD3D11RenderDevice::RenderVREyes()
 		int top = (int)ceilf(Clamp(Max(sbsRects[0][1], sbsRects[1][1]), 0.0f, (float)eh));
 		int bot = (int)floorf(Clamp(Min(sbsRects[0][1] + sbsRects[0][3], sbsRects[1][1] + sbsRects[1][3]), 0.0f, (float)eh));
 		int ch = (bot - top) & ~1;
-		if (ch >= 16 && (!menuUp || VRSbsCropH == 0))
+		if (ch >= 16)
 		{
-			VRSbsSrcT = top;
-			VRSbsCropH = ch;
-			VRSbsCropW = (int)ew;
-			VRSBSSizeX = VRSbsCropW * 2;
-			VRSBSSizeY = ch;
+			// Establish the backbuffer size ONCE (from a gameplay frame — menu look-around skews
+			// the measure) and freeze it: transient view changes (death cam, zoom) wobble the
+			// measured height by a few px, and a swapchain resize aborts recorders mid-clip.
+			// Re-establish only if the eye resolution itself changed (VRResScale).
+			if ((VRSbsCropH == 0 && !menuUp) || (VRSbsCropH > 0 && VRSbsCropW != (int)ew))
+			{
+				VRSbsCropH = ch;
+				VRSbsCropW = (int)ew;
+				VRSBSSizeX = VRSbsCropW * 2;
+				VRSBSSizeY = VRSbsCropH;
+			}
+			// The vertical position keeps tracking the screen at the frozen height.
+			if (VRSbsCropH > 0 && VRSbsCropH <= (int)eh)
+				VRSbsSrcT = Clamp(top, 0, (int)eh - VRSbsCropH);
 		}
 	}
 
