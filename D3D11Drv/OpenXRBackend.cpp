@@ -261,11 +261,14 @@ bool OpenXRBackend::Start(ID3D11Device* device, float resScale)
 	XrViewConfigurationView configViews[2] = { { XR_TYPE_VIEW_CONFIGURATION_VIEW }, { XR_TYPE_VIEW_CONFIGURATION_VIEW } };
 	xrEnumerateViewConfigurationViews(Instance, SystemId, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, 2, &viewCount, configViews);
 
-	// Supersample the recommended resolution, clamped to what the runtime allows.
-	if (resScale < 0.25f) resScale = 0.25f;
-	if (resScale > 4.0f) resScale = 4.0f;
+	// Supersample the recommended resolution. The real ceiling is the runtime's maxImageRect
+	// (clamped below) — the scale range is only a sanity guard against garbage config values.
+	if (resScale < 1.0f / 16.0f) resScale = 1.0f / 16.0f;
+	if (resScale > 16.0f) resScale = 16.0f;
 	EyeWidth = (uint32_t)(configViews[0].recommendedImageRectWidth * resScale);
 	EyeHeight = (uint32_t)(configViews[0].recommendedImageRectHeight * resScale);
+	if (EyeWidth < 64) EyeWidth = 64;
+	if (EyeHeight < 64) EyeHeight = 64;
 	if (configViews[0].maxImageRectWidth && EyeWidth > configViews[0].maxImageRectWidth) EyeWidth = configViews[0].maxImageRectWidth;
 	if (configViews[0].maxImageRectHeight && EyeHeight > configViews[0].maxImageRectHeight) EyeHeight = configViews[0].maxImageRectHeight;
 
