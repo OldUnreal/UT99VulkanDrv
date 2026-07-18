@@ -60,6 +60,7 @@ D3D11Drv specific settings (OpenXR virtual reality):
 	VRBrightnessScale=1.000000
 	VRBrightnessOffset=0.000000
 	VRMirrorMode=1
+	VRSBSHalf=False
 
 ## Description of settings
 
@@ -119,6 +120,7 @@ D3D11Drv can render the game in stereo to an OpenXR headset (SteamVR, Oculus/Met
   - 2: Like 1, but the mirror is also active whenever a menu is open (mouse visible).
   - 3: Always mirror. The mirror renders the mono game view aligned with the window, so menus stay clickable with the mouse.
   - 4: Side-by-side recording mode. The window backbuffer is resized to hold both eye images at full eye resolution side by side, cropped vertically to the game screen. A game recorder that hooks the game itself (Bandicam game recording mode, OBS game capture) will capture a full resolution SBS 3D video; YouTube and 3D players accept it directly. The backbuffer size is locked for the whole session so the recording is never interrupted, and head roll is not applied so the recorded frames stay level. The window itself just shows a squeezed preview in this mode.
+- VRSBSHalf: Only used in VRMirrorMode 4. When enabled, each eye is squeezed to half width so the whole frame is one eye wide instead of two (half-SBS / "half side-by-side"). This is the format YouTube and most 3D players expect for a normal-aspect video, and it halves the recorded width. Off by default (full side-by-side, one eye's full resolution per side).
 
 Console commands available while D3D11Drv is active:
 

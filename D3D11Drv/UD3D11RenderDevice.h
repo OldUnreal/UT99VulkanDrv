@@ -118,6 +118,9 @@ public:
 	float VRHoleX = 0.0f, VRHoleY = 0.0f, VRHoleZ = 1000.0f; // screen-frame hole half-extents captured when InjectVRScreenFrame draws it — the SBS crop measures THESE through the real replay matrices
 	int VRSbsCropW = 0, VRSbsCropH = 0;   // SBS half width (= full eye width) and vertical crop height in eye rows (screen rows only — strips the letterbox black); frozen while a menu is up
 	int VRSbsSrcT = 0;                     // top eye row of the vertical crop (screen top)
+	ComPtr<ID3D11Texture2D> SbsStaging;    // half-SBS: full-width (2 x eye) scratch that the eyes copy into, then squeezed to the half-width backbuffer
+	ComPtr<ID3D11ShaderResourceView> SbsStagingView;
+	int SbsStagingW = 0, SbsStagingH = 0;
 	bool DxgiSwapChainAllowTearing = false;
 	int BufferCount = 2;
 	std::set<std::string> SeenDebugMessages;
@@ -290,6 +293,7 @@ public:
 	FLOAT VRBrightnessOffset;
 	BYTE VRMirrorMode;        // desktop mirror: 0=off, 1=when headset removed (default), 2=in menu, 3=always, 4=SBS record (full-res side-by-side backbuffer for game-capture recorders, head-look kept level)
 	UBOOL VRScaleHudMeshes;   // scale PostRender Gouraud meshes (e.g. mod radar icons) with the HUD, at HUD depth
+	UBOOL VRSBSHalf;          // VRMirrorMode 4: squeeze the SBS backbuffer to half width (half-SBS, YouTube 3D) instead of full side-by-side
 
 	struct
 	{
@@ -415,6 +419,7 @@ private:
 	void SetupSceneTarget(uint32_t width, uint32_t height);
 	void DrawSceneWithClears(const mat4& objectToProjection, size_t begin, size_t end);
 	void RunPresentPass(ID3D11RenderTargetView* output, UINT width, UINT height, float brightnessScale = 1.0f, float brightnessOffset = 0.0f, bool bloom = true, bool alreadyResolved = false);
+	void BlitSbsHalf(ID3D11ShaderResourceView* src, ID3D11RenderTargetView* output, UINT width, UINT height);
 	void SetupSceneTargetMirror(uint32_t width, uint32_t height); // 1-sample mirror target (PPImage[0] + 1-sample depth), no MSAA
 
 	void PrintDebugLayerMessages();

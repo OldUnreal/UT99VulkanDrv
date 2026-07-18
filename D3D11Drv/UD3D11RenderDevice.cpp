@@ -95,6 +95,7 @@ void UD3D11RenderDevice::StaticConstructor()
 	VRBrightnessOffset = 0.0f;
 	VRMirrorMode = 1; // 0=off, 1=when headset removed, 2=in menu, 3=always, 4=SBS record (full-res side-by-side backbuffer for game-capture recorders)
 	VRScaleHudMeshes = 0;
+	VRSBSHalf = 0;
 
 #if defined(OLDUNREAL469SDK)
 	new(GetClass(), TEXT("UseLightmapAtlas"), RF_Public) UBoolProperty(CPP_PROPERTY(UseLightmapAtlas), TEXT("Display"), CPF_Config);
@@ -122,6 +123,7 @@ void UD3D11RenderDevice::StaticConstructor()
 	new(GetClass(), TEXT("VRBrightnessOffset"), RF_Public) UFloatProperty(CPP_PROPERTY(VRBrightnessOffset), TEXT("Display"), CPF_Config);
 	new(GetClass(), TEXT("VRMirrorMode"), RF_Public) UByteProperty(CPP_PROPERTY(VRMirrorMode), TEXT("Display"), CPF_Config);
 	new(GetClass(), TEXT("VRScaleHudMeshes"), RF_Public) UBoolProperty(CPP_PROPERTY(VRScaleHudMeshes), TEXT("Display"), CPF_Config);
+	new(GetClass(), TEXT("VRSBSHalf"), RF_Public) UBoolProperty(CPP_PROPERTY(VRSBSHalf), TEXT("Display"), CPF_Config);
 	new(GetClass(), TEXT("GammaOffset"), RF_Public) UFloatProperty(CPP_PROPERTY(GammaOffset), TEXT("Display"), CPF_Config);
 	new(GetClass(), TEXT("GammaOffsetRed"), RF_Public) UFloatProperty(CPP_PROPERTY(GammaOffsetRed), TEXT("Display"), CPF_Config);
 	new(GetClass(), TEXT("GammaOffsetGreen"), RF_Public) UFloatProperty(CPP_PROPERTY(GammaOffsetGreen), TEXT("Display"), CPF_Config);
@@ -4074,6 +4076,47 @@ void UD3D11RenderDevice::RunPresentPass(ID3D11RenderTargetView* output, UINT wid
 	Context->Draw(6, 0);
 }
 
+// Half-SBS: squeeze the full-width SBS staging into the half-width backbuffer. Reuses the present
+// pipeline (fullscreen quad + linear sampler) so the viewport does the 2:1 horizontal downscale,
+// but with NEUTRAL constants (identity gamma, no colour correct) — the staging already holds the
+// fully-processed eye pixels, so this is a pass-through resample, not a second tonemap.
+void UD3D11RenderDevice::BlitSbsHalf(ID3D11ShaderResourceView* src, ID3D11RenderTargetView* output, UINT width, UINT height)
+{
+	ID3D11RenderTargetView* rtvs[1] = { output };
+	Context->OMSetRenderTargets(1, rtvs, nullptr);
+
+	D3D11_VIEWPORT viewport = {};
+	viewport.Width = (float)width;
+	viewport.Height = (float)height;
+	viewport.MaxDepth = 1.0f;
+	Context->RSSetViewports(1, &viewport);
+
+	PresentPushConstants pushconstants = {};
+	pushconstants.Contrast = 1.0f;
+	pushconstants.Saturation = 1.0f;
+	pushconstants.Brightness = 0.0f;
+	pushconstants.HdrScale = 1.0f;
+	pushconstants.GammaCorrection = vec4(1.0f, 1.0f, 1.0f, 1.0f); // pow(c,1) = identity
+
+	UINT stride = sizeof(vec2);
+	UINT offset = 0;
+	ID3D11Buffer* vertexBuffers[1] = { PresentPass.PPStepVertexBuffer.get() };
+	ID3D11ShaderResourceView* psResources[] = { src, PresentPass.DitherTextureView };
+	ID3D11Buffer* cbs[1] = { PresentPass.PresentConstantBuffer.get() };
+	Context->IASetVertexBuffers(0, 1, vertexBuffers, &stride, &offset);
+	Context->IASetInputLayout(PresentPass.PPStepLayout);
+	Context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+	Context->VSSetShader(PresentPass.PPStep, nullptr, 0);
+	Context->RSSetState(PresentPass.RasterizerState);
+	Context->PSSetShader(PresentPass.Present[0], nullptr, 0); // 0 = no HDR, D3D9 gamma, no colour correct
+	Context->PSSetConstantBuffers(0, 1, cbs);
+	Context->PSSetShaderResources(0, 2, psResources);
+	Context->OMSetDepthStencilState(PresentPass.DepthStencilState, 0);
+	Context->OMSetBlendState(PresentPass.BlendState, nullptr, 0xffffffff);
+	Context->UpdateSubresource(PresentPass.PresentConstantBuffer, 0, nullptr, &pushconstants, 0, 0);
+	Context->Draw(6, 0);
+}
+
 // Replay the accumulated frame into ColorBuffer with a given projection. Shared
 // by each eye and by the flat desktop pass — the geometry is identical, only the
 // projection and target size differ.
@@ -4451,6 +4494,7 @@ void UD3D11RenderDevice::RenderVREyes()
 	float scale = VRWorldScale;
 
 	bool sbs = VRMirrorMode == 4 && !ActiveHdr && ew && eh;
+	bool sbsHalf = sbs && VRSBSHalf; // half-SBS: eyes squeezed to half width (backbuffer = 1 eye wide)
 
 	// Weapon zoom (sniper etc.): the game shrinks FovAngle to magnify. We keep the
 	// fixed XR eye FOV, so reproduce the magnification by scaling the eye projection
@@ -4478,6 +4522,31 @@ void UD3D11RenderDevice::RenderVREyes()
 		{
 			ReleaseSwapChainResources();
 			UpdateSwapChain(false); // swapchain only — the scene buffers are eye-sized mid-frame
+		}
+	}
+
+	// Half-SBS: the eyes copy into a full-width (2 x eye) staging texture, which is then squeezed to
+	// the half-width backbuffer. Sized to the frozen crop (from the previous frame); recreated only
+	// on a size change (VRResScale). Independent of the swapchain, so it survives ReleaseSwapChainResources.
+	if (sbsHalf && VRSbsCropH > 0)
+	{
+		int sw = (int)ew * 2, sh = VRSbsCropH;
+		if (SbsStagingW != sw || SbsStagingH != sh)
+		{
+			SbsStaging.reset();
+			SbsStagingView.reset();
+			SbsStagingW = SbsStagingH = 0;
+			D3D11_TEXTURE2D_DESC td = {};
+			td.Width = sw; td.Height = sh; td.MipLevels = 1; td.ArraySize = 1;
+			td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+			td.SampleDesc.Count = 1;
+			td.Usage = D3D11_USAGE_DEFAULT;
+			td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+			if (SUCCEEDED(Device->CreateTexture2D(&td, nullptr, SbsStaging.TypedInitPtr())) &&
+				SUCCEEDED(Device->CreateShaderResourceView(SbsStaging, nullptr, SbsStagingView.TypedInitPtr())))
+			{
+				SbsStagingW = sw; SbsStagingH = sh;
+			}
 		}
 	}
 	float sbsRects[2][4] = {}; // per eye this frame: left/top/width/height of the screen rect in eye pixels
@@ -4694,21 +4763,34 @@ void UD3D11RenderDevice::RenderVREyes()
 				// SBS record: copy the full eye width, cropped vertically to the screen rows
 				// (strips the letterbox black), each eye butted at the centre seam. The side
 				// eye-frame borders are already black in the eye image; the inner (nose) edge
-				// runs to the render limit — maximum kept toward the nose.
-				if (sbs && BackBuffer && VRSbsCropH > 0 && VRSbsCropW >= (int)ew &&
-					BackBufferSizeX == VRSbsCropW * 2 && BackBufferSizeY == VRSbsCropH &&
+				// runs to the render limit — maximum kept toward the nose. Full-SBS copies straight
+				// into the backbuffer; half-SBS copies into the full-width staging (squeezed after).
+				ID3D11Texture2D* sbsDst = sbsHalf ? SbsStaging.get() : BackBuffer.get();
+				bool sbsDstOk = sbsHalf
+					? (SbsStaging && SbsStagingW == VRSbsCropW * 2 && SbsStagingH == VRSbsCropH)
+					: (BackBuffer && BackBufferSizeX == VRSbsCropW * 2 && BackBufferSizeY == VRSbsCropH);
+				if (sbs && sbsDst && sbsDstOk && VRSbsCropH > 0 && VRSbsCropW >= (int)ew &&
 					VRSbsSrcT + VRSbsCropH <= (int)eh)
 				{
 					D3D11_BOX box = {};
 					box.left = 0; box.top = (UINT)VRSbsSrcT; box.front = 0;
 					box.right = VRSbsCropW; box.bottom = (UINT)(VRSbsSrcT + VRSbsCropH); box.back = 1;
-					Context->CopySubresourceRegion(BackBuffer, 0, eye == 0 ? 0 : ((int)VRSbsCropW), 0, 0, image, 0, &box);
+					Context->CopySubresourceRegion(sbsDst, 0, eye == 0 ? 0 : ((int)VRSbsCropW), 0, 0, image, 0, &box);
 				}
 			}
 			else
 				debugf(TEXT("D3D11Drv VR: CreateRenderTargetView(eye) failed 0x%08x"), (unsigned)hr);
 			VR->EndEye(eye);
 		}
+	}
+
+	// Half-SBS: squeeze the full-width staging (both eyes) 2:1 into the half-width backbuffer with a
+	// linear blit (pass-through gamma — the eye pixels are already fully processed). Full-SBS wrote
+	// straight into the backbuffer above.
+	if (sbsHalf && SbsStagingView && BackBufferView && VRSbsCropH > 0 &&
+		BackBufferSizeX == VRSbsCropW && BackBufferSizeY == VRSbsCropH && SbsStagingW == VRSbsCropW * 2)
+	{
+		BlitSbsHalf(SbsStagingView, BackBufferView, (UINT)VRSbsCropW, (UINT)VRSbsCropH);
 	}
 
 	// SBS record: vertical crop to the screen rows (removes the letterbox black top/bottom); the
@@ -4733,12 +4815,17 @@ void UD3D11RenderDevice::RenderVREyes()
 			{
 				VRSbsCropH = ch;
 				VRSbsCropW = (int)ew;
-				VRSBSSizeX = VRSbsCropW * 2;
+				VRSBSSizeX = sbsHalf ? VRSbsCropW : VRSbsCropW * 2; // half-SBS backbuffer is one eye wide
 				VRSBSSizeY = VRSbsCropH;
 			}
 			// The vertical position keeps tracking the screen at the frozen height.
 			if (VRSbsCropH > 0 && VRSbsCropH <= (int)eh)
 				VRSbsSrcT = Clamp(top, 0, (int)eh - VRSbsCropH);
+			// Half/full toggled mid-session: re-point the backbuffer width once (a deliberate config
+			// change, like VRResScale — a one-time resize is fine here).
+			int wantX = sbsHalf ? VRSbsCropW : VRSbsCropW * 2;
+			if (VRSbsCropH > 0 && VRSBSSizeX != wantX)
+				VRSBSSizeX = wantX;
 		}
 	}
 
