@@ -93,7 +93,7 @@ void UD3D11RenderDevice::StaticConstructor()
 	VRWeaponIPDScale = 1.0f;
 	VRBrightnessScale = 1.0f;
 	VRBrightnessOffset = 0.0f;
-	VRMirrorMode = 1; // 0=off, 1=when headset removed, 2=in menu, 3=always, 4=SBS record (full-res side-by-side backbuffer for game-capture recorders)
+	VRMirrorMode = 1; // 0=off, 1=when headset removed, 2=in menu, 3=always, 4=SBS record (full-res side-by-side backbuffer for game-capture recorders), 5=flat record (always on, window-sized like a normal viewport, HUD never scaled)
 	VRScaleHudMeshes = 0;
 	VRSBSHalf = 0;
 
@@ -4426,7 +4426,8 @@ void UD3D11RenderDevice::DrawVRCursor()
 // desktop mirror so on-screen text is readable and mouse hit-testing lines up.
 // Should the flat desktop mirror render this frame? VRMirrorMode: 0=off, 1=only when the
 // headset is removed (default), 2=also in menu (mouse free), 3=always, 4=SBS record (no mono
-// replay — handled separately in RenderVREyes; >=3 here doubles as its HDR fallback). The
+// replay — handled separately in RenderVREyes; >=3 here doubles as its HDR fallback), 5=flat
+// record (always-on mirror, window-sized swapchain like a normal viewport, HUD never scaled). The
 // headset-worn poll (VR->IsWorn(), which combines session focus + user presence) is throttled
 // to ~once a second so these checks never cost per-frame.
 bool UD3D11RenderDevice::VRWantMirror()
@@ -4853,8 +4854,12 @@ void UD3D11RenderDevice::RenderVREyes()
 				k++;
 			if (pt == VRPROJ_HUDMESH)
 			{
+				// Mode 5 records the flat view with the HUD unscaled: in-game HUDMESH scale IS the
+				// HUD scale (previews only exist while a menu is up), so drop it here; menu previews
+				// keep their own per-batch scale.
+				bool noHudScale = VRMirrorMode == 5 && !menuUp;
 				for (size_t m = j; m < k; m++)
-					DrawSceneWithClears(monoProj * mat4::scale(QueuedBatches[m].VRMeshSX, QueuedBatches[m].VRMeshSY, 1.0f), m, m + 1);
+					DrawSceneWithClears(noHudScale ? monoProj : monoProj * mat4::scale(QueuedBatches[m].VRMeshSX, QueuedBatches[m].VRMeshSY, 1.0f), m, m + 1);
 				j = k;
 				continue;
 			}

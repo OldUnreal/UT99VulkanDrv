@@ -291,7 +291,7 @@ public:
 	FLOAT VRWeaponIPDScale; // stereo separation for the first-person weapon (HACKFLAGS_NoNearZ); <1 pulls it out of your nose
 	FLOAT VRBrightnessScale;  // HMD eye brightness = game brightness * scale + offset (eye only; mirror keeps the game's)
 	FLOAT VRBrightnessOffset;
-	BYTE VRMirrorMode;        // desktop mirror: 0=off, 1=when headset removed (default), 2=in menu, 3=always, 4=SBS record (full-res side-by-side backbuffer for game-capture recorders, head-look kept level)
+	BYTE VRMirrorMode;        // desktop mirror: 0=off, 1=when headset removed (default), 2=in menu, 3=always, 4=SBS record (full-res side-by-side backbuffer for game-capture recorders, head-look kept level), 5=flat record (always on, swapchain tracks the window like a normal viewport, HUD never scaled in the mirror)
 	UBOOL VRScaleHudMeshes;   // scale PostRender Gouraud meshes (e.g. mod radar icons) with the HUD, at HUD depth
 	UBOOL VRSBSHalf;          // VRMirrorMode 4: squeeze the SBS backbuffer to half width (half-SBS, YouTube 3D) instead of full side-by-side
 
