@@ -2663,7 +2663,7 @@ void UD3D11RenderDevice::DrawGouraudPolygon(FSceneNode* Frame, FTextureInfo& Inf
 				sx = inGame ? VRHudScaleX : 1.0f;
 				sy = inGame ? VRHudScaleY : 1.0f;
 			}
-			VRSetMeshProj(sx, sy);
+			VRSetProj(VRPROJ_HUDMESH, sx, sy);
 		}
 		else
 			VRSetProj(noNearZ ? VRPROJ_WEAPON : VRIsSkyFrame(Frame) ? VRPROJ_SKY : VRPROJ_WORLD);
@@ -2855,7 +2855,7 @@ void UD3D11RenderDevice::DrawGouraudTriangles(const FSceneNode* Frame, const FTe
 				sx = inGame ? VRHudScaleX : 1.0f;
 				sy = inGame ? VRHudScaleY : 1.0f;
 			}
-			VRSetMeshProj(sx, sy);
+			VRSetProj(VRPROJ_HUDMESH, sx, sy);
 		}
 		else
 			VRSetProj(noNearZ ? VRPROJ_WEAPON : VRIsSkyFrame(Frame) ? VRPROJ_SKY : VRPROJ_WORLD);
@@ -3074,7 +3074,11 @@ void UD3D11RenderDevice::DrawTileList(const FSceneNode* Frame, const FTextureInf
 	if (VRRetaining)
 	{
 		VRHudMeshArm = false; // a tile ends the post-ClearZ mesh run
-		VRSetProj((GUglyHackFlags & HACKFLAGS_NoNearZ) ? VRPROJ_HUDOVERLAY : VRPROJ_WORLD);
+		// Gameplay HUD tiles (PostRender, Z~1) carry the HUD scale on the batch (see VRSetProj).
+		bool hudScale = (GUglyHackFlags & HACKFLAGS_PostRender) && Abs(1.0f - Z) <= SMALL_NUMBER &&
+			Viewport && !Viewport->bShowWindowsMouse;
+		VRSetProj((GUglyHackFlags & HACKFLAGS_NoNearZ) ? VRPROJ_HUDOVERLAY : VRPROJ_WORLD,
+			hudScale ? VRHudScaleX : 1.0f, hudScale ? VRHudScaleY : 1.0f);
 		VRBeginPostRender();
 	}
 
@@ -3114,22 +3118,13 @@ void UD3D11RenderDevice::DrawTileList(const FSceneNode* Frame, const FTextureInf
 	// leave those alone or they'd sit at HUD distance and misalign with the world.
 	// Flat HUD (Z~1) -> convergence depth (PostRender start, depth clear and the screen
 	// frame are handled by VRBeginPostRender above). Gameplay HUD vs free-mouse UI depth.
-	bool vrHud = false;
 	if (VRRetaining && (GUglyHackFlags & HACKFLAGS_PostRender) && Abs(1.0f - Z) <= SMALL_NUMBER)
 	{
 		Z = (Viewport && !Viewport->bShowWindowsMouse) ? VRHudDepth : VRUIDepth;
-		vrHud = true;
 	}
 
 	float rfx2z = RFX2 * Z;
 	float rfy2z = RFY2 * Z;
-	// HUD scale: gameplay only (mouse captured) so menu/UI is untouched. Baked into the
-	// tile verts, so it currently affects the desktop mirror too (see VR_NOTES).
-	if (vrHud && Viewport && !Viewport->bShowWindowsMouse)
-	{
-		rfx2z *= VRHudScaleX;
-		rfy2z *= VRHudScaleY;
-	}
 
 	for (INT i = 0; i < NumTiles; i++)
 	{
@@ -3282,15 +3277,20 @@ void UD3D11RenderDevice::DrawTile(FSceneNode* Frame, FTextureInfo& Info, FLOAT X
 	if (VRRetaining)
 	{
 		VRHudMeshArm = false; // a tile ends the post-ClearZ mesh run
+		// Gameplay HUD tiles (PostRender, Z~1) carry the HUD scale on the batch (see VRSetProj).
+		bool hudScale = (GUglyHackFlags & HACKFLAGS_PostRender) && Abs(1.0f - Z) <= SMALL_NUMBER &&
+			Viewport && !Viewport->bShowWindowsMouse;
+		float sx = hudScale ? VRHudScaleX : 1.0f;
+		float sy = hudScale ? VRHudScaleY : 1.0f;
 		if (GUglyHackFlags & HACKFLAGS_NoNearZ)
 		{
 			// Centre = crosshair (no size test — sniper/vehicle reticles are huge); off-centre = HUD.
 			bool cross = Abs((X + XL * 0.5f) - Frame->FX2) < Frame->FX * 0.06f &&
 				Abs((Y + YL * 0.5f) - Frame->FY2) < Frame->FY * 0.06f;
-			VRSetProj(cross ? VRPROJ_CROSSHAIR : VRPROJ_HUDOVERLAY);
+			VRSetProj(cross ? VRPROJ_CROSSHAIR : VRPROJ_HUDOVERLAY, sx, sy);
 		}
 		else
-			VRSetProj(VRPROJ_WORLD);
+			VRSetProj(VRPROJ_WORLD, sx, sy);
 		VRBeginPostRender();
 	}
 
@@ -3349,7 +3349,6 @@ void UD3D11RenderDevice::DrawTile(FSceneNode* Frame, FTextureInfo& Info, FLOAT X
 
 		// Flat HUD (Z~1) -> convergence depth. Sprites (Z != 1) keep their real world Z.
 		// Gameplay: centre tiles (the crosshair) get their own depth; free mouse -> UI depth.
-		bool vrHud = false;
 		if (VRRetaining && (GUglyHackFlags & HACKFLAGS_PostRender) && Abs(1.0f - Z) <= SMALL_NUMBER)
 		{
 			if (Viewport && !Viewport->bShowWindowsMouse)
@@ -3373,16 +3372,10 @@ void UD3D11RenderDevice::DrawTile(FSceneNode* Frame, FTextureInfo& Info, FLOAT X
 			{
 				Z = VRUIDepth;
 			}
-			vrHud = true;
 		}
 
 		float rfx2z = RFX2 * Z;
 		float rfy2z = RFY2 * Z;
-		if (vrHud && Viewport && !Viewport->bShowWindowsMouse) // gameplay only; menu/UI untouched
-		{
-			rfx2z *= VRHudScaleX;
-			rfy2z *= VRHudScaleY;
-		}
 		X -= Frame->FX2;
 		Y -= Frame->FY2;
 		XL += X;
@@ -3899,24 +3892,17 @@ void UD3D11RenderDevice::AddDrawBatch()
 // (reduced IPD), overlay crosshair / overlay HUD (crosshair vs HUD convergence). Forcing a
 // boundary on change keeps each batch on exactly one projection, so no fragile range
 // ordering is needed — the replay just groups adjacent same-tag batches.
-void UD3D11RenderDevice::VRSetProj(int proj)
+// sx/sy: optional per-batch view-space scale (HUD tiles scaled toward the centre, preview/radar
+// meshes with their own size). Carried on the batch — NOT baked into the verts — so the replay
+// decides per target whether to apply it (the eyes always do; the mode-5 mirror records the HUD
+// unscaled). Boundary on a scale change too, else two runs with different scales would merge and
+// share the last one.
+void UD3D11RenderDevice::VRSetProj(int proj, float sx, float sy)
 {
-	if (VRRetaining && proj != VRCurProj)
+	if (VRRetaining && (proj != VRCurProj || sx != VRCurMeshSX || sy != VRCurMeshSY))
 	{
 		AddDrawBatch();
 		VRCurProj = proj;
-	}
-}
-
-// Tag the accumulating batch as a HUD mesh with its own view-space scale. Each preview/radar mesh
-// carries its own size (subX/FOV differ per sub-view), so boundary the batch on a scale change too —
-// otherwise two previews with different scales would merge and share the last one.
-void UD3D11RenderDevice::VRSetMeshProj(float sx, float sy)
-{
-	if (VRRetaining && (VRCurProj != VRPROJ_HUDMESH || sx != VRCurMeshSX || sy != VRCurMeshSY))
-	{
-		AddDrawBatch();
-		VRCurProj = VRPROJ_HUDMESH;
 		VRCurMeshSX = sx;
 		VRCurMeshSY = sy;
 	}
@@ -4299,13 +4285,18 @@ void UD3D11RenderDevice::VRBeginHudRange()
 	VRHudStart = (int)QueuedBatches.size();
 	if (VRClearZBeforeHud)
 		VRClearZAt.push_back((size_t)VRHudStart);
-	// The border draws with the world projection (a far black edge; must not inherit the
-	// triggering draw's tag — a HUD-scaled border would move the visible FOV edge).
+	// The border draws with the world projection at scale 1 (a far black edge; must not inherit
+	// the triggering draw's tag or scale — a HUD-scaled border would move the visible FOV edge
+	// and skew the SBS crop measurement).
 	int saved = VRCurProj;
+	float savedSX = VRCurMeshSX, savedSY = VRCurMeshSY;
 	VRCurProj = VRPROJ_WORLD;
+	VRCurMeshSX = VRCurMeshSY = 1.0f;
 	InjectVRScreenFrame();
 	AddDrawBatch();
 	VRCurProj = saved;
+	VRCurMeshSX = savedSX;
+	VRCurMeshSY = savedSY;
 }
 
 void UD3D11RenderDevice::VRBeginPostRender()
@@ -4376,8 +4367,10 @@ void UD3D11RenderDevice::DrawVRCursor()
 	float h = (float)TexInfo.VSize;
 
 	// Near depth range so the cursor sits on top regardless of its UI-depth stereo Z (same
-	// trick as the FP weapon). WORLD projection so it converges at that Z.
+	// trick as the FP weapon). WORLD projection so it converges at that Z, scale 1 (a stale
+	// preview-mesh scale would size the cursor).
 	VRCurProj = VRPROJ_WORLD;
+	VRCurMeshSX = VRCurMeshSY = 1.0f;
 	VRCursorPipeline = *GetPipeline(PF_Masked);
 	VRCursorPipeline.MinDepth = 0.0f;
 	VRCursorPipeline.MaxDepth = 0.05f;
@@ -4723,24 +4716,23 @@ void UD3D11RenderDevice::RenderVREyes()
 		for (size_t j = 0; j < total; )
 		{
 			int pt = QueuedBatches[j].VRProj;
+			float sx = QueuedBatches[j].VRMeshSX, sy = QueuedBatches[j].VRMeshSY;
 			size_t k = j;
-			while (k < total && QueuedBatches[k].VRProj == pt)
+			while (k < total && QueuedBatches[k].VRProj == pt &&
+				QueuedBatches[k].VRMeshSX == sx && QueuedBatches[k].VRMeshSY == sy)
 				k++;
-			if (pt == VRPROJ_HUDMESH)
-			{
-				// Per-batch scale: adjacent HUD meshes may be different previews/icons.
-				for (size_t m = j; m < k; m++)
-					DrawSceneWithClears(worldProj * mat4::scale(QueuedBatches[m].VRMeshSX, QueuedBatches[m].VRMeshSY, 1.0f), m, m + 1);
-				j = k;
-				continue;
-			}
 			const mat4& proj =
 				(pt == VRPROJ_SKY) ? skyProj :
 				(pt == VRPROJ_WEAPON) ? weaponProj :
 				(pt == VRPROJ_CROSSHAIR) ? overlayProj :
 				(pt == VRPROJ_HUDOVERLAY) ? hudOverlayProj :
-				(pt == VRPROJ_FLASH) ? flashProj : worldProj;
-			DrawSceneWithClears(proj, j, k);
+				(pt == VRPROJ_FLASH) ? flashProj : worldProj; // HUDMESH uses worldProj too
+			// Per-batch view-space scale (scaled HUD tiles, preview/radar meshes) — carried on the
+			// batch, applied here (worldProj for HUD meshes; the batch boundary splits scale runs).
+			if (sx != 1.0f || sy != 1.0f)
+				DrawSceneWithClears(proj * mat4::scale(sx, sy, 1.0f), j, k);
+			else
+				DrawSceneWithClears(proj, j, k);
 			j = k;
 		}
 
@@ -4844,26 +4836,24 @@ void UD3D11RenderDevice::RenderVREyes()
 		mat4 flashProj = mat4::identity();
 		SetupSceneTargetMirror(ew, eh); // 1-sample into PPImage[0]: no MSAA, no resolve, no bloom
 		// Mirror: all scene batches (no cursor) with the plain mono projection, except the flash
-		// quad (already clip-space) and HUD meshes (each its own per-batch view-space scale, like
-		// the eye path; monoProj is symmetric so the scale order is cosmetic), same depth clears.
+		// quad (already clip-space); per-batch view-space scale (scaled HUD tiles, preview/radar
+		// meshes) like the eye path (monoProj is symmetric so the scale order is cosmetic), same
+		// depth clears. Mode 5 records the flat view with the HUD unscaled: every in-game batch
+		// scale IS the HUD scale (previews only exist while a menu is up), so drop them all here;
+		// menu previews keep their own per-batch scale.
+		bool noHudScale = VRMirrorMode == 5 && !menuUp;
 		for (size_t j = 0; j < sceneBatches; )
 		{
 			int pt = QueuedBatches[j].VRProj;
+			float sx = QueuedBatches[j].VRMeshSX, sy = QueuedBatches[j].VRMeshSY;
 			size_t k = j;
-			while (k < sceneBatches && QueuedBatches[k].VRProj == pt)
+			while (k < sceneBatches && QueuedBatches[k].VRProj == pt &&
+				QueuedBatches[k].VRMeshSX == sx && QueuedBatches[k].VRMeshSY == sy)
 				k++;
-			if (pt == VRPROJ_HUDMESH)
-			{
-				// Mode 5 records the flat view with the HUD unscaled: in-game HUDMESH scale IS the
-				// HUD scale (previews only exist while a menu is up), so drop it here; menu previews
-				// keep their own per-batch scale.
-				bool noHudScale = VRMirrorMode == 5 && !menuUp;
-				for (size_t m = j; m < k; m++)
-					DrawSceneWithClears(noHudScale ? monoProj : monoProj * mat4::scale(QueuedBatches[m].VRMeshSX, QueuedBatches[m].VRMeshSY, 1.0f), m, m + 1);
-				j = k;
-				continue;
-			}
-			DrawSceneWithClears((pt == VRPROJ_FLASH) ? flashProj : monoProj, j, k);
+			if (noHudScale || (sx == 1.0f && sy == 1.0f))
+				DrawSceneWithClears((pt == VRPROJ_FLASH) ? flashProj : monoProj, j, k);
+			else
+				DrawSceneWithClears(monoProj * mat4::scale(sx, sy, 1.0f), j, k);
 			j = k;
 		}
 	}

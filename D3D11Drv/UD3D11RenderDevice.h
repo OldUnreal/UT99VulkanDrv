@@ -205,7 +205,7 @@ public:
 		uint32_t DetailtexSamplerMode = 0;
 		uint32_t MacrotexSamplerMode = 0;
 		int VRProj = 0; // which eye projection this batch replays with (VRPROJ_*)
-		float VRMeshSX = 1.0f, VRMeshSY = 1.0f; // per-batch HUDMESH view-space scale (each preview/radar its own size)
+		float VRMeshSX = 1.0f, VRMeshSY = 1.0f; // per-batch view-space scale (scaled HUD tiles; each preview/radar mesh its own size); applied at replay, not baked into verts, so the mode-5 mirror can skip it
 	} Batch;
 	std::vector<DrawBatchEntry> QueuedBatches;
 	CachedTexture* nulltex = nullptr;
@@ -410,8 +410,7 @@ private:
 	void RenderVREyes();
 	bool VRWantMirror(); // should the desktop mirror render this frame? (VRMirrorMode + worn + menu; worn poll throttled)
 	void DrawVRCursor(); // draw the real UWindow cursor into the eyes (HMD has no OS cursor)
-	void VRSetProj(int proj); // tag the accumulating batch's eye projection (VRPROJ_*), boundary on change
-	void VRSetMeshProj(float sx, float sy); // tag the accumulating batch as HUDMESH with a per-mesh view-space scale, boundary on change
+	void VRSetProj(int proj, float sx = 1.0f, float sy = 1.0f); // tag the accumulating batch's eye projection (VRPROJ_*) + per-batch view-space scale, boundary on change
 	bool VRIsSkyFrame(const FSceneNode* Frame); // is this frame rendering a skybox zone? (cached per level)
 	void VRBeginHudRange();   // start the HUD range (VRHudStart, depth clear, screen frame)
 	void VRBeginPostRender(); // trigger VRBeginHudRange on the first PostRender draw
