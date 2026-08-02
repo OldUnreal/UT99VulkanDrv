@@ -28,6 +28,16 @@ public:
 	std::array<std::unique_ptr<DeleteList>, MAX_FRAMES_IN_FLIGHT> FrameDeleteLists;
 	DeleteList* GetCurrentDeleteList() { return FrameDeleteLists[CurrentFrameIndex].get(); }
 
+	// Which of this device's frame slots is being written. It used to be one
+	// variable for the whole process, which held up for exactly as long as there
+	// was one device: with two - the editor's viewport and a browser preview, or
+	// the terrain editor - each of them advanced the other's, so a device would
+	// pick the slot its own previous frame was still rendering from and start
+	// overwriting its vertices. Both pictures come apart, and the more the GPU
+	// has to do, the more often. It belongs to the device that waits on the
+	// fences guarding it.
+	uint32_t CurrentFrameIndex = 0;
+
 	std::shared_ptr<VulkanSwapChain> SwapChain;
 	int PresentImageIndex = -1;
 	BITFIELD UsingVsync = 0;

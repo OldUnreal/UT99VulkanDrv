@@ -5,8 +5,6 @@
 #include <cmath>
 #include <stdexcept>
 
-uint32_t CurrentFrameIndex = 0;
-
 #if !defined(WIN32)
 #if SDL2BUILD
 #include <SDL2/SDL_vulkan.h>
@@ -438,8 +436,8 @@ void UVulkanRenderDevice::SubmitAndWait(bool present, int presentWidth, int pres
 	Commands->SubmitCommands(present, presentWidth, presentHeight, presentFullscreen);
 
 	Batch.SceneIndexStart = 0;
-	SceneVertexPositions[CurrentFrameIndex] = 0;
-	SceneIndexPositions[CurrentFrameIndex] = 0;
+	SceneVertexPositions[Commands->CurrentFrameIndex] = 0;
+	SceneIndexPositions[Commands->CurrentFrameIndex] = 0;
 }
 
 #if defined(UNREALGOLD)
@@ -459,10 +457,10 @@ void UVulkanRenderDevice::Flush()
 		auto cmdbuffer = Commands->GetDrawCommands();
 		RenderPasses->BeginScene(cmdbuffer, 0.0f, 0.0f, 0.0f, 1.0f);
 
-		VkBuffer vertexBuffers[] = { Buffers->SceneVertexBuffers[CurrentFrameIndex]->buffer };
+		VkBuffer vertexBuffers[] = { Buffers->SceneVertexBuffers[Commands->CurrentFrameIndex]->buffer };
 		VkDeviceSize offsets[] = { 0 };
 		cmdbuffer->bindVertexBuffers(0, 1, vertexBuffers, offsets);
-		cmdbuffer->bindIndexBuffer(Buffers->SceneIndexBuffers[CurrentFrameIndex]->buffer, 0, VK_INDEX_TYPE_UINT32);
+		cmdbuffer->bindIndexBuffer(Buffers->SceneIndexBuffers[Commands->CurrentFrameIndex]->buffer, 0, VK_INDEX_TYPE_UINT32);
 	}
 	else
 	{
@@ -513,10 +511,10 @@ void UVulkanRenderDevice::Flush(UBOOL AllowPrecache)
 			.AddClearDepthStencil(1.0f, 0)
 			.Execute(cmdbuffer);
 
-		VkBuffer vertexBuffers[] = { Buffers->SceneVertexBuffers[CurrentFrameIndex]->buffer };
+		VkBuffer vertexBuffers[] = { Buffers->SceneVertexBuffers[Commands->CurrentFrameIndex]->buffer };
 		VkDeviceSize offsets[] = { 0 };
 		cmdbuffer->bindVertexBuffers(0, 1, vertexBuffers, offsets);
-		cmdbuffer->bindIndexBuffer(Buffers->SceneIndexBuffers[CurrentFrameIndex]->buffer, 0, VK_INDEX_TYPE_UINT32);
+		cmdbuffer->bindIndexBuffer(Buffers->SceneIndexBuffers[Commands->CurrentFrameIndex]->buffer, 0, VK_INDEX_TYPE_UINT32);
 	}
 	else
 	{
@@ -700,10 +698,10 @@ void UVulkanRenderDevice::Lock(FPlane InFlashScale, FPlane InFlashFog, FPlane Sc
 			.AddClearDepthStencil(1.0f, 0)
 			.Execute(cmdbuffer);
 
-		VkBuffer vertexBuffers[] = { Buffers->SceneVertexBuffers[CurrentFrameIndex]->buffer };
+		VkBuffer vertexBuffers[] = { Buffers->SceneVertexBuffers[Commands->CurrentFrameIndex]->buffer };
 		VkDeviceSize offsets[] = { 0 };
 		cmdbuffer->bindVertexBuffers(0, 1, vertexBuffers, offsets);
-		cmdbuffer->bindIndexBuffer(Buffers->SceneIndexBuffers[CurrentFrameIndex]->buffer, 0, VK_INDEX_TYPE_UINT32);
+		cmdbuffer->bindIndexBuffer(Buffers->SceneIndexBuffers[Commands->CurrentFrameIndex]->buffer, 0, VK_INDEX_TYPE_UINT32);
 
 		IsLocked = true;
 	}
@@ -746,10 +744,10 @@ void UVulkanRenderDevice::FlushDrawBatchAndWait()
 		.RenderArea(0, 0, Textures->Scene->Width, Textures->Scene->Height)
 		.Execute(drawcommands);
 
-	VkBuffer vertexBuffers[] = { Buffers->SceneVertexBuffers[CurrentFrameIndex]->buffer };
+	VkBuffer vertexBuffers[] = { Buffers->SceneVertexBuffers[Commands->CurrentFrameIndex]->buffer };
 	VkDeviceSize offsets[] = { 0 };
 	drawcommands->bindVertexBuffers(0, 1, vertexBuffers, offsets);
-	drawcommands->bindIndexBuffer(Buffers->SceneIndexBuffers[CurrentFrameIndex]->buffer, 0, VK_INDEX_TYPE_UINT32);
+	drawcommands->bindIndexBuffer(Buffers->SceneIndexBuffers[Commands->CurrentFrameIndex]->buffer, 0, VK_INDEX_TYPE_UINT32);
 	drawcommands->setViewport(0, 1, &viewportdesc);
 }
 
@@ -886,7 +884,7 @@ void UVulkanRenderDevice::DrawBatch(VulkanCommandBuffer* cmdbuffer)
 {
 	if (!Batch.Pipeline)
 		return;
-	size_t SceneIndexPos = SceneIndexPositions[CurrentFrameIndex];
+	size_t SceneIndexPos = SceneIndexPositions[Commands->CurrentFrameIndex];
 	size_t icount = SceneIndexPos - Batch.SceneIndexStart;
 	if (icount > 0)
 	{
@@ -1816,7 +1814,8 @@ void UVulkanRenderDevice::SetSceneNode(FSceneNode* Frame)
 
 	CurrentFrame = Frame;
 	Aspect = Frame->FY / Frame->FX;
-	RProjZ = (float)appTan(radians(Viewport->Actor->FovAngle) * 0.5);
+	APlayerPawn* ViewActor = Frame->Viewport ? Frame->Viewport->Actor : nullptr;
+	RProjZ = (float)appTan(radians(ViewActor ? ViewActor->FovAngle : 90.0f) * 0.5);
 	RFX2 = 2.0f * RProjZ / Frame->FX;
 	RFY2 = 2.0f * RProjZ * Aspect / Frame->FY;
 

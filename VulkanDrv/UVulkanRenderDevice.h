@@ -155,8 +155,8 @@ private:
 
 	VertexReserveInfo ReserveVertices(size_t vcount, size_t icount)
 	{
-		size_t& SceneVertexPos = SceneVertexPositions[CurrentFrameIndex];
-		size_t& SceneIndexPos = SceneIndexPositions[CurrentFrameIndex];
+		size_t& SceneVertexPos = SceneVertexPositions[Commands->CurrentFrameIndex];
+		size_t& SceneIndexPos = SceneIndexPositions[Commands->CurrentFrameIndex];
 
 		// If buffers are full, flush and wait for room.
 		if (SceneVertexPos + vcount > (size_t)BufferManager::SceneVertexBufferSize || SceneIndexPos + icount > (size_t)BufferManager::SceneIndexBufferSize)
@@ -168,15 +168,15 @@ private:
 			FlushDrawBatchAndWait();
 		}
 
-		return { Buffers->SceneVerticesArray[CurrentFrameIndex] + SceneVertexPos, Buffers->SceneIndexesArray[CurrentFrameIndex] + SceneIndexPos, (uint32_t)SceneVertexPos };
+		return { Buffers->SceneVerticesArray[Commands->CurrentFrameIndex] + SceneVertexPos, Buffers->SceneIndexesArray[Commands->CurrentFrameIndex] + SceneIndexPos, (uint32_t)SceneVertexPos };
 	}
 
 	void FlushDrawBatchAndWait();
 
 	void UseVertices(size_t vcount, size_t icount)
 	{
-		size_t& SceneVertexPos = SceneVertexPositions[CurrentFrameIndex];
-		size_t& SceneIndexPos = SceneIndexPositions[CurrentFrameIndex];
+		size_t& SceneVertexPos = SceneVertexPositions[Commands->CurrentFrameIndex];
+		size_t& SceneIndexPos = SceneIndexPositions[Commands->CurrentFrameIndex];
 
 		SceneVertexPos += vcount;
 		SceneIndexPos += icount;

@@ -55,4 +55,7 @@
 #endif
 
 constexpr int MAX_FRAMES_IN_FLIGHT = 2;
-extern uint32_t CurrentFrameIndex;
+// The frame index belongs to a device, not to the process: it picks which of
+// that device's per-frame command buffers, fences and vertex buffers to use,
+// and it may only advance when THAT device has finished a frame. It lives on
+// CommandBufferManager - see the note there.
