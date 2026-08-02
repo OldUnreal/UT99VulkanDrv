@@ -884,6 +884,8 @@ void UVulkanRenderDevice::UpdateTextureRect(FTextureInfo& Info, INT U, INT V, IN
 
 void UVulkanRenderDevice::DrawBatch(VulkanCommandBuffer* cmdbuffer)
 {
+	if (!Batch.Pipeline)
+		return;
 	size_t SceneIndexPos = SceneIndexPositions[CurrentFrameIndex];
 	size_t icount = SceneIndexPos - Batch.SceneIndexStart;
 	if (icount > 0)
