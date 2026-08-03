@@ -66,7 +66,9 @@ void CommandBufferManager::WaitForTransfer()
 	auto& TransferCommands = TransferCommandsArray[CurrentFrameIndex];
 	auto& RenderFinishedFence = RenderFinishedFences[CurrentFrameIndex];
 
-	if (TransferCommands)
+	// Whether this frame began recording, not whether the slot has a buffer at
+	// all - it keeps the one from last time round.
+	if (TransferCommandsBegun[CurrentFrameIndex])
 	{
 		TransferCommands->end();
 
@@ -109,7 +111,12 @@ void CommandBufferManager::SubmitCommands(bool present, int presentWidth, int pr
 		}
 	}
 
-	if (TransferCommands)
+	// The slot's buffer outlives the frame that recorded it. Ending and
+	// submitting it again on a frame that recorded nothing sends the previous
+	// recording a second time - the copies of an earlier frame, reading staging
+	// memory that has since been freed and writing into images that have since
+	// been recreated. Both flags below say what THIS frame recorded.
+	if (TransferCommandsBegun[CurrentFrameIndex])
 	{
 		TransferCommands->end();
 
@@ -126,15 +133,15 @@ void CommandBufferManager::SubmitCommands(bool present, int presentWidth, int pr
 		SubmitTransfer.Execute(renderer->Device.get(), renderer->Device.get()->GraphicsQueue);
 	}
 
-	if (DrawCommands)
+	if (DrawCommandsBegun[CurrentFrameIndex])
 		DrawCommands->end();
 
 	QueueSubmit submit;
-	if (DrawCommands)
+	if (DrawCommandsBegun[CurrentFrameIndex])
 	{
 		submit.AddCommandBuffer(DrawCommands.get());
 	}
-	if (TransferCommands)
+	if (TransferCommandsBegun[CurrentFrameIndex])
 	{
 		submit.AddWait(VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, TransferSemaphore.get());
 	}
