@@ -181,12 +181,20 @@ bool OpenXRBackend::QueryAdapterLuid(uint64_t& outLuid)
 	ci.applicationInfo.applicationVersion = 1;
 	strcpy_s(ci.applicationInfo.engineName, "Unreal");
 	ci.applicationInfo.engineVersion = 1;
-	ci.applicationInfo.apiVersion = XR_CURRENT_API_VERSION;
+	// Ask for 1.0, NOT XR_CURRENT_API_VERSION: the vendored headers are 1.1.x, but every call we
+	// make is 1.0 core (plus the D3D11 KHR extension), and a runtime that implements only 1.0 —
+	// SteamVR — rejects a 1.1 instance with XR_ERROR_API_VERSION_UNSUPPORTED. The loader negotiates
+	// and loads such a runtime fine, so the failure lands here, on the chained CreateInstance.
+	// Extensions are versioned independently, so this does not affect XR_EXT_user_presence above.
+	ci.applicationInfo.apiVersion = XR_API_VERSION_1_0;
 
 	XrResult r = createInstance(&ci, &Instance);
 	if (XR_FAILED(r))
 	{
-		debugf(TEXT("D3D11Drv VR: xrCreateInstance failed (%d) — no runtime / D3D11 unsupported"), (int)r);
+		debugf(TEXT("D3D11Drv VR: xrCreateInstance failed (%d)%s"), (int)r,
+			(r == XR_ERROR_API_VERSION_UNSUPPORTED) ? TEXT(" — runtime rejected OpenXR API version 1.0") :
+			(r == XR_ERROR_EXTENSION_NOT_PRESENT) ? TEXT(" — runtime lacks XR_KHR_D3D11_enable (no D3D11 support)") :
+			TEXT(" — no usable OpenXR runtime"));
 		return false;
 	}
 
