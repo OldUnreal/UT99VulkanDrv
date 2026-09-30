@@ -97,6 +97,8 @@ void CommandBufferManager::SubmitCommands(bool present, int presentWidth, int pr
 	{
 		if (SwapChain->Lost() || SwapChain->Width() != presentWidth || SwapChain->Height() != presentHeight || UsingVsync != renderer->UseVSync || UsingHdr != renderer->Hdr)
 		{
+			// Frames still in flight render into and present the old swapchain images
+			vkDeviceWaitIdle(renderer->Device.get()->device);
 			UsingVsync = renderer->UseVSync;
 			UsingHdr = renderer->Hdr;
 			renderer->Framebuffers->DestroySwapChainFramebuffers();

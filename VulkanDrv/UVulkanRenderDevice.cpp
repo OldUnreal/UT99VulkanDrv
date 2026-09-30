@@ -664,6 +664,8 @@ void UVulkanRenderDevice::Lock(FPlane InFlashScale, FPlane InFlashFog, FPlane Sc
 		// If frame textures no longer match the window or user settings, recreate them along with the swap chain
 		if (!Textures->Scene || Textures->Scene->Width != Viewport->SizeX || Textures->Scene->Height != Viewport->SizeY ||Textures->Scene->Multisample != GetSettingsMultisample())
 		{
+			// Frames still in flight render into these
+			vkDeviceWaitIdle(Device->device);
 			Framebuffers->DestroySceneFramebuffer();
 			Textures->Scene.reset();
 			Textures->Scene.reset(new SceneTextures(this, Viewport->SizeX, Viewport->SizeY, GetSettingsMultisample()));
@@ -800,6 +802,8 @@ void UVulkanRenderDevice::Unlock(UBOOL Blit)
 
 		if (Samplers->LODBias != LODBias)
 		{
+			// Frames still in flight use these samplers and descriptors
+			vkDeviceWaitIdle(Device->device);
 			DescriptorSets->ClearCache();
 			Textures->ClearAllBindlessIndexes();
 			Samplers->CreateSceneSamplers();
@@ -807,6 +811,9 @@ void UVulkanRenderDevice::Unlock(UBOOL Blit)
 
 		if (HitData)
 		{
+			// The frame writing StagingHitBuffer is still in flight
+			vkDeviceWaitIdle(Device->device);
+
 			// Look for the last hit
 			int width = Viewport->HitXL;
 			int height = Viewport->HitYL;
@@ -1751,8 +1758,10 @@ void UVulkanRenderDevice::ReadPixels(FColor* Pixels)
 	region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
 	cmdbuffer->copyImageToBuffer(dstimage->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, staging->buffer, 1, &region);
 
-	// Submit command buffers and wait for device to finish the work
+	// Submit command buffers and wait for device to finish the work.
+	// SubmitAndWait returns with the frame still in flight, and staging is read and freed below along with dstimage.
 	SubmitAndWait(false, 0, 0, false);
+	vkDeviceWaitIdle(Device->device);
 
 	uint8_t* pixels = (uint8_t*)staging->Map(0, w * h * 4);
 	memcpy(data, pixels, w * h * 4);
@@ -1844,6 +1853,8 @@ void UVulkanRenderDevice::PrecacheTexture(FTextureInfo& Info, DWORD PolyFlags)
 
 void UVulkanRenderDevice::ClearTextureCache()
 {
+	// Frames still in flight sample these textures
+	vkDeviceWaitIdle(Device->device);
 	DescriptorSets->ClearCache();
 	Textures->ClearCache();
 	Uploads->ClearCache();
