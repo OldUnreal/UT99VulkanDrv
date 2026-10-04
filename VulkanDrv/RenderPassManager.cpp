@@ -188,6 +188,10 @@ void RenderPassManager::CreatePipelines()
 		builder.Layout(layout);
 		builder.RenderPass(Scene.RenderPass.get());
 
+		// UnrealEd draws 2D overlays (e.g. the box selection in a 3D viewport) in front of the near plane
+		if (renderer->Device.get()->EnabledFeatures.Features.depthClamp)
+			builder.DepthClampEnable(true);
+
 		builder.AddColorBlendAttachment(ColorBlendAttachmentBuilder().BlendMode(VK_BLEND_OP_ADD, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA).Create());
 		builder.AddColorBlendAttachment(ColorBlendAttachmentBuilder().Create());
 
@@ -228,6 +232,9 @@ void RenderPassManager::CreatePipelines()
 		builder.AddDynamicState(VK_DYNAMIC_STATE_VIEWPORT);
 		builder.Layout(layout);
 		builder.RenderPass(Scene.RenderPass.get());
+
+		if (renderer->Device.get()->EnabledFeatures.Features.depthClamp)
+			builder.DepthClampEnable(true);
 
 		builder.AddColorBlendAttachment(ColorBlendAttachmentBuilder().BlendMode(VK_BLEND_OP_ADD, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA).Create());
 		builder.AddColorBlendAttachment(ColorBlendAttachmentBuilder().Create());
