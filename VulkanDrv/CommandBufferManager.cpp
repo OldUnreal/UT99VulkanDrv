@@ -48,7 +48,9 @@ CommandBufferManager::~CommandBufferManager()
 void CommandBufferManager::BeginFrame()
 {
 	VkFence currentFence = RenderFinishedFences[CurrentFrameIndex]->fence;
-	vkWaitForFences(renderer->Device.get()->device, 1, &currentFence, VK_TRUE, std::numeric_limits<uint64_t>::max());
+	// A lost submit never signals its fence
+	if (!renderer->Device->Lost)
+		vkWaitForFences(renderer->Device.get()->device, 1, &currentFence, VK_TRUE, std::numeric_limits<uint64_t>::max());
 	vkResetFences(renderer->Device.get()->device, 1, &currentFence);
 
 	// Safely clear old Vulkan objects now that the GPU is 100% done with this frame index
@@ -75,7 +77,8 @@ void CommandBufferManager::WaitForTransfer()
 		QueueSubmit()
 			.AddCommandBuffer(TransferCommands.get())
 			.Execute(renderer->Device.get(), renderer->Device.get()->GraphicsQueue, RenderFinishedFence.get());
-		vkWaitForFences(renderer->Device.get()->device, 1, &RenderFinishedFence->fence, VK_TRUE, std::numeric_limits<uint64_t>::max());
+		if (!renderer->Device->Lost)
+			vkWaitForFences(renderer->Device.get()->device, 1, &RenderFinishedFence->fence, VK_TRUE, std::numeric_limits<uint64_t>::max());
 		vkResetFences(renderer->Device.get()->device, 1, &RenderFinishedFence->fence);
 
 		TransferCommands->begin();
@@ -92,6 +95,10 @@ void CommandBufferManager::SubmitCommands(bool present, int presentWidth, int pr
 	auto& RenderFinishedFence = RenderFinishedFences[CurrentFrameIndex];
 	auto& DrawCommands = DrawCommandsArray[CurrentFrameIndex];
 	auto& TransferCommands = TransferCommandsArray[CurrentFrameIndex];
+
+	// Nothing reaches the screen from a lost device until Lock replaces it
+	if (renderer->Device->Lost)
+		present = false;
 
 	if (present)
 	{
@@ -158,7 +165,8 @@ void CommandBufferManager::SubmitCommands(bool present, int presentWidth, int pr
 	FrameBegun = false;
 	IsFirstFrame = false;
 
-	if (present && PresentImageIndex != -1)
+	// A lost submit never signals RenderFinishedSemaphore
+	if (present && PresentImageIndex != -1 && !renderer->Device->Lost)
 	{
 		SwapChain->QueuePresent(PresentImageIndex, RenderFinishedSemaphore.get());
 	}

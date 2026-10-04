@@ -186,6 +186,29 @@ UBOOL UVulkanRenderDevice::Init(UViewport* InViewport, INT NewX, INT NewY, INT N
 
 	Viewport = InViewport;
 
+#if !defined(WIN32)
+	// SDLDrv doesn't create the window until you call ResizeViewport
+	if (!Viewport->ResizeViewport(Fullscreen ? (BLIT_Fullscreen | BLIT_Vulkan) : (BLIT_HardwarePaint | BLIT_Vulkan), NewX, NewY, NewColorBytes))
+	{
+		debugf(TEXT("Couldn't create Window"));
+		return 0;
+	}
+#endif
+
+	if (!CreateDevice() || !SetRes(NewX, NewY, NewColorBytes, Fullscreen))
+	{
+		Exit();
+		return 0;
+	}
+
+	return 1;
+	unguard;
+}
+
+UBOOL UVulkanRenderDevice::CreateDevice()
+{
+	guard(UVulkanRenderDevice::CreateDevice);
+
 	try
 	{
 
@@ -202,13 +225,6 @@ UBOOL UVulkanRenderDevice::Init(UViewport* InViewport, INT NewX, INT NewY, INT N
 			.Create(instance);
 		deviceBuilder.Surface(surface);
 #else
-		// SDLDrv doesn't create the window until you call ResizeViewport
-		if (!Viewport->ResizeViewport(Fullscreen ? (BLIT_Fullscreen | BLIT_Vulkan) : (BLIT_HardwarePaint | BLIT_Vulkan), NewX, NewY, NewColorBytes))
-		{
-			debugf(TEXT("Couldn't create Window"));
-			return 0;
-		}
-
 		auto window = (SDL_Window*)Viewport->GetWindow();
 
 		auto instanceBuilder = VulkanInstanceBuilder();
@@ -311,13 +327,31 @@ UBOOL UVulkanRenderDevice::Init(UViewport* InViewport, INT NewX, INT NewY, INT N
 		return 0;
 	}
 
-	if (!SetRes(NewX, NewY, NewColorBytes, Fullscreen))
+	return 1;
+	unguard;
+}
+
+void UVulkanRenderDevice::RecreateLostDevice()
+{
+	guard(UVulkanRenderDevice::RecreateLostDevice);
+
+	debugf(TEXT("Vulkan device lost, recreating it"));
+
+	// The driver can still be resetting the GPU for a few seconds after a TDR
+	Exit();
+	for (int attempt = 1; !CreateDevice(); attempt++)
 	{
-		Exit();
-		return 0;
+		if (attempt == 10)
+			appErrorf(TEXT("Could not recreate the lost Vulkan device"));
+		appSleep(0.5f);
 	}
 
-	return 1;
+	// These point into the buffers and pipelines of the old device
+	Batch.SceneIndexStart = 0;
+	Batch.Pipeline = nullptr;
+	SceneVertexPositions.fill(0);
+	SceneIndexPositions.fill(0);
+
 	unguard;
 }
 
@@ -661,6 +695,10 @@ void UVulkanRenderDevice::Lock(FPlane InFlashScale, FPlane InFlashFog, FPlane Sc
 
 	try
 	{
+		// A device lost anywhere since the last frame is replaced here, before anything is recorded on it
+		if (Device->Lost)
+			RecreateLostDevice();
+
 		// If frame textures no longer match the window or user settings, recreate them along with the swap chain
 		if (!Textures->Scene || Textures->Scene->Width != Viewport->SizeX || Textures->Scene->Height != Viewport->SizeY ||Textures->Scene->Multisample != GetSettingsMultisample())
 		{

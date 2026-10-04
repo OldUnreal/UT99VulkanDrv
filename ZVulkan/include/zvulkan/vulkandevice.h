@@ -39,6 +39,10 @@ public:
 	int PresentFamily = -1;
 	bool GraphicsTimeQueries = false;
 
+	// A submit, acquire or present returned VK_ERROR_DEVICE_LOST. Nothing runs on this device
+	// anymore and it can't be reset: the owner has to destroy it and create a new one.
+	bool Lost = false;
+
 	bool SupportsExtension(const char* ext) const;
 
 	void SetObjectName(const char* name, uint64_t handle, VkObjectType type);
