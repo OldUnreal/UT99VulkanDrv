@@ -118,20 +118,19 @@ void RenderPassManager::CreatePipelines()
 		if (renderer->Device.get()->EnabledFeatures.Features.depthClamp)
 			builder.DepthClampEnable(true);
 
+		// No depth bias on translucent/modulated pipelines (D3D11 and D3D12 have none either): at grazing
+		// angles or far away, even a one-step bias pulls them through the geometry in front of them
 		ColorBlendAttachmentBuilder colorblend;
 		switch (i & 3)
 		{
 		case 0: // PF_Translucent
 			colorblend.BlendMode(VK_BLEND_OP_ADD, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR);
-			builder.DepthBias(true, -1.0f, 0.0f, -1.0f);
 			break;
 		case 1: // PF_Modulated
 			colorblend.BlendMode(VK_BLEND_OP_ADD, VK_BLEND_FACTOR_DST_COLOR, VK_BLEND_FACTOR_SRC_COLOR);
-			builder.DepthBias(true, -1.0f, 0.0f, -1.0f);
 			break;
 		case 2: // PF_Highlighted
 			colorblend.BlendMode(VK_BLEND_OP_ADD, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA);
-			builder.DepthBias(true, -1.0f, 0.0f, -1.0f);
 			break;
 		case 3:
 			colorblend.BlendMode(VK_BLEND_OP_ADD, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ZERO); // Hmm, is it faster to keep the blend mode enabled or to toggle it?
