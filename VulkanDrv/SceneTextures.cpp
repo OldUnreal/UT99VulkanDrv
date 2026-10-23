@@ -176,7 +176,7 @@ VkSampleCountFlagBits SceneTextures::GetBestSampleCount(VulkanDevice* device, in
 	int samples = 1;
 	VkSampleCountFlags bit = VK_SAMPLE_COUNT_1_BIT;
 	VkSampleCountFlags best = bit;
-	while (samples < requestedSamples)
+	while (samples <= requestedSamples)
 	{
 		if (deviceSampleCounts & bit)
 		{
