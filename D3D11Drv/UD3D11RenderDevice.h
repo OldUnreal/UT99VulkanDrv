@@ -388,7 +388,7 @@ private:
 	bool VRSkyZones[64] = {};       // per-zone: geometry in this zone is a skybox (drawn with zero IPD -> infinity)
 	ULevel* VRSkyZonesLevel = nullptr; // level the flags were built for (rebuild on change)
 	// Per-batch eye projection tags (DrawBatchEntry::VRProj), set during accumulation.
-	enum { VRPROJ_WORLD = 0, VRPROJ_WEAPON, VRPROJ_CROSSHAIR, VRPROJ_HUDOVERLAY, VRPROJ_SKY, VRPROJ_FLASH, VRPROJ_HUDMESH };
+	enum { VRPROJ_WORLD = 0, VRPROJ_WEAPON, VRPROJ_CROSSHAIR, VRPROJ_HUDOVERLAY, VRPROJ_SKY, VRPROJ_FLASH, VRPROJ_HUDMESH, VRPROJ_CORONA };
 	int VRCurProj = 0;             // projection tag for the batch currently accumulating
 	float VRCurMeshSX = 1.0f, VRCurMeshSY = 1.0f; // HUDMESH scale for the batch currently accumulating
 	bool VRHudMeshArm = false;     // a HUD-phase ClearZ armed the next Gouraud as a HUD mesh (VRScaleHudMeshes)

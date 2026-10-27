@@ -46,6 +46,7 @@ void UD3D11RenderDevice::StaticConstructor()
 	UseLightmapAtlas = 0; // Note: do not turn this on. It does not work and generates broken fogmaps.
 	SupportsUpdateTextureRect = 1;
 	SupportsDrawTileList = 1;
+	SupportsCoronaDepth = 1; // corona/flare tiles arrive at the light's view-space depth (VR stereo; mono drops it, see DrawTile)
 	MaxTextureSize = 4096;
 	NeedsMaskedFonts = 0;
 	DescFlags |= RDDESCF_Certified;
@@ -3269,6 +3270,20 @@ void UD3D11RenderDevice::DrawTile(FSceneNode* Frame, FTextureInfo& Info, FLOAT X
 	Timers.DrawTile.Clock();
 	ActiveTimer = &Timers.DrawTile;
 
+	// Coronas and lens flares (Render brackets their draw with HACKFLAGS_DrawingCorona). With
+	// SupportsCoronaDepth, Z is the light's view-space depth — every element of a flare carries its
+	// light's — and 1 means none (a sky-zone light). A tile's screen position and size don't depend
+	// on Z (verts scale by Z, the projection divides it back out); only the depth test and the VR
+	// stereo convergence do. So in VR a corona converges at its light (VRPROJ_CORONA, replayed
+	// depth-off so the glow around a lamp doesn't z-fight the wall it hangs on). Everything else
+	// keeps the classic near-Z screen-space tile: mono, sky-zone lights (zero IPD like the sky), and
+	// lights far enough that the disparity is sub-pixel anyway — the cap also keeps the tile well
+	// inside the 32768 far plane when head-look rotates the frame.
+	bool corona = (GUglyHackFlags & HACKFLAGS_DrawingCorona) != 0;
+	bool coronaDepth = corona && VRRetaining && Z > 1.0f + SMALL_NUMBER && Z < 8192.0f;
+	if (corona && !coronaDepth)
+		Z = 1.0f;
+
 	// Overlays (RenderOverlays: HACKFLAGS_NoNearZ) are drawn near, no near clip — a Z~1
 	// tile with full eye IPD is shoved off-screen (visible on the mono mirror only). These
 	// tiles are custom weapon crosshairs AND HUD (bars/ammo). Only the actual crosshair
@@ -3290,7 +3305,11 @@ void UD3D11RenderDevice::DrawTile(FSceneNode* Frame, FTextureInfo& Info, FLOAT X
 			VRSetProj(cross ? VRPROJ_CROSSHAIR : VRPROJ_HUDOVERLAY, sx, sy);
 		}
 		else
-			VRSetProj(VRPROJ_WORLD, sx, sy);
+		{
+			// A near-Z corona tile (see above) needs zero IPD: full world IPD at Z~1 would throw it
+			// off-screen in opposite directions per eye.
+			VRSetProj(coronaDepth ? VRPROJ_CORONA : corona ? VRPROJ_SKY : VRPROJ_WORLD, sx, sy);
+		}
 		VRBeginPostRender();
 	}
 
@@ -4217,11 +4236,12 @@ void UD3D11RenderDevice::DrawSceneWithClears(const mat4& objectToProjection, siz
 		// world when the phase that clears depth first (the weapon) isn't drawn (e.g. in menu).
 		// 3D meshes drawn in the HUD phase (VRPROJ_HUDMESH: radar icons, the menu player-mesh
 		// preview) keep depth so their own polygons self-occlude — only flat tiles/overlays go
-		// depth-off.
+		// depth-off. Coronas at their light's depth go depth-off too: the engine already decided
+		// they're visible, and depth-tested the glow would z-fight the wall the lamp hangs on.
 		int pt = QueuedBatches[i].VRProj;
 		bool noDepth = pt != VRPROJ_HUDMESH
 			&& ((VRHudStart >= 0 && i >= (size_t)VRHudStart)
-				|| pt == VRPROJ_CROSSHAIR || pt == VRPROJ_HUDOVERLAY);
+				|| pt == VRPROJ_CROSSHAIR || pt == VRPROJ_HUDOVERLAY || pt == VRPROJ_CORONA);
 		DrawEntry(QueuedBatches[i], noDepth);
 	}
 }
