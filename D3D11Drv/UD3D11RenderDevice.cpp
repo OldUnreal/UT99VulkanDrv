@@ -2363,6 +2363,14 @@ void UD3D11RenderDevice::UpdateTextureRect(FTextureInfo& Info, INT U, INT V, INT
 
 #endif
 
+static void SetLayerUV(float* pan, float* mult, const FTextureInfo& Info, float Center)
+{
+	pan[0] = Info.Pan.X - Center * Info.UScale;
+	pan[1] = Info.Pan.Y - Center * Info.VScale;
+	mult[0] = 1.0f / (Info.UScale * Info.USize);
+	mult[1] = 1.0f / (Info.VScale * Info.VSize);
+}
+
 void UD3D11RenderDevice::DrawComplexSurface(FSceneNode* Frame, FSurfaceInfo& Surface, FSurfaceFacet& Facet)
 {
 	guardSlow(UD3D11RenderDevice::DrawComplexSurface);
@@ -2378,7 +2386,7 @@ void UD3D11RenderDevice::DrawComplexSurface(FSceneNode* Frame, FSurfaceInfo& Sur
 
 	DWORD PolyFlags = ApplyPrecedenceRules(Surface.PolyFlags);
 
-	ComplexSurfaceInfo info;
+	ComplexSurfaceInfo info = {};
 	info.facet = &Facet;
 	info.tex = Textures->GetTexture(Surface.Texture, (PolyFlags & PF_Masked) || 
 		(Surface.Texture->Texture && (Surface.Texture->Texture->PolyFlags & PF_Masked)));
@@ -2397,6 +2405,16 @@ void UD3D11RenderDevice::DrawComplexSurface(FSceneNode* Frame, FSurfaceInfo& Sur
 
 	if (info.fogmap != nulltex)
 		info.detailtex = info.fogmap;
+
+	SetLayerUV(info.pan, info.mult, *Surface.Texture, 0.0f);
+	if (info.lightmap != nulltex)
+		SetLayerUV(info.pan + 2, info.mult + 2, *Surface.LightMap, 0.5f);
+	if (info.macrotex != nulltex)
+		SetLayerUV(info.pan + 4, info.mult + 4, *Surface.MacroTexture, 0.0f);
+	if (info.fogmap != nulltex)
+		SetLayerUV(info.pan + 6, info.mult + 6, *Surface.FogMap, 0.5f);
+	else if (info.detailtex != nulltex)
+		SetLayerUV(info.pan + 6, info.mult + 6, *Surface.DetailTexture, 0.0f);
 
 	SetPipeline(PolyFlags);
 	SetDescriptorSet(PolyFlags, info);
@@ -2476,29 +2494,10 @@ void UD3D11RenderDevice::DrawComplexSurfaceFaces(const ComplexSurfaceInfo& info)
 	__m128 UVDot = _mm_shuffle_ps(UDot, VDot, _MM_SHUFFLE(0, 0, 0, 0));
 	UVDot = _mm_shuffle_ps(UVDot, UVDot, _MM_SHUFFLE(2, 0, 2, 0));
 
-	float UPan = info.tex->PanX;
-	float VPan = info.tex->PanY;
-	float LMUPan = info.lightmap->PanX - 0.5f * info.lightmap->UScale;
-	float LMVPan = info.lightmap->PanY - 0.5f * info.lightmap->VScale;
-	__m128 pan0 = _mm_add_ps(UVDot, _mm_setr_ps(UPan, VPan, LMUPan, LMVPan));
-
-	float MacroUPan = info.macrotex->PanX;
-	float MacroVPan = info.macrotex->PanY;
-	float DetailUPan = info.fogmap == nulltex ? info.detailtex->PanX : info.fogmap->PanX - 0.5f * info.fogmap->UScale;
-	float DetailVPan = info.fogmap == nulltex ? info.detailtex->PanY : info.fogmap->PanY - 0.5f * info.fogmap->VScale;
-	__m128 pan1 = _mm_add_ps(UVDot, _mm_setr_ps(MacroUPan, MacroVPan, DetailUPan, DetailVPan));
-
-	float UMult = info.tex->UMult;
-	float VMult = info.tex->VMult;
-	float LMUMult = info.lightmap->UMult;
-	float LMVMult = info.lightmap->VMult;
-	__m128 mult0 = _mm_setr_ps(UMult, VMult, LMUMult, LMVMult);
-
-	float MacroUMult = info.macrotex->UMult;
-	float MacroVMult = info.macrotex->VMult;
-	float DetailUMult = info.fogmap == nulltex ? info.detailtex->UMult : info.fogmap->UMult;
-	float DetailVMult = info.fogmap == nulltex ? info.detailtex->VMult : info.fogmap->VMult;
-	__m128 mult1 = _mm_setr_ps(MacroUMult, MacroVMult, DetailUMult, DetailVMult);
+	__m128 pan0 = _mm_add_ps(UVDot, _mm_loadu_ps(info.pan));
+	__m128 pan1 = _mm_add_ps(UVDot, _mm_loadu_ps(info.pan + 4));
+	__m128 mult0 = _mm_loadu_ps(info.mult);
+	__m128 mult1 = _mm_loadu_ps(info.mult + 4);
 
 	__m128 color = info.editorcolor ? _mm_loadu_ps(&info.editorcolor->x) : _mm_set_ps1(1.0f);
 
@@ -2563,23 +2562,23 @@ void UD3D11RenderDevice::DrawComplexSurfaceFaces(const ComplexSurfaceInfo& info)
 	float UDot = xaxis | info.facet->MapCoords.Origin;
 	float VDot = yaxis | info.facet->MapCoords.Origin;
 
-	float UPan = UDot + info.tex->PanX;
-	float VPan = VDot + info.tex->PanY;
-	float LMUPan = UDot + info.lightmap->PanX - 0.5f * info.lightmap->UScale;
-	float LMVPan = VDot + info.lightmap->PanY - 0.5f * info.lightmap->VScale;
-	float MacroUPan = UDot + info.macrotex->PanX;
-	float MacroVPan = VDot + info.macrotex->PanY;
-	float DetailUPan = UDot + (info.fogmap == nulltex ? info.detailtex->PanX : info.fogmap->PanX - 0.5f * info.fogmap->UScale);
-	float DetailVPan = VDot + (info.fogmap == nulltex ? info.detailtex->PanY : info.fogmap->PanY - 0.5f * info.fogmap->VScale);
+	float UPan = UDot + info.pan[0];
+	float VPan = VDot + info.pan[1];
+	float LMUPan = UDot + info.pan[2];
+	float LMVPan = VDot + info.pan[3];
+	float MacroUPan = UDot + info.pan[4];
+	float MacroVPan = VDot + info.pan[5];
+	float DetailUPan = UDot + info.pan[6];
+	float DetailVPan = VDot + info.pan[7];
 
-	float UMult = info.tex->UMult;
-	float VMult = info.tex->VMult;
-	float LMUMult = info.lightmap->UMult;
-	float LMVMult = info.lightmap->VMult;
-	float MacroUMult = info.macrotex->UMult;
-	float MacroVMult = info.macrotex->VMult;
-	float DetailUMult = info.fogmap == nulltex ? info.detailtex->UMult : info.fogmap->UMult;
-	float DetailVMult = info.fogmap == nulltex ? info.detailtex->VMult : info.fogmap->VMult;
+	float UMult = info.mult[0];
+	float VMult = info.mult[1];
+	float LMUMult = info.mult[2];
+	float LMVMult = info.mult[3];
+	float MacroUMult = info.mult[4];
+	float MacroVMult = info.mult[5];
+	float DetailUMult = info.mult[6];
+	float DetailVMult = info.mult[7];
 
 	vec4 color = info.editorcolor ? *info.editorcolor : vec4(1.0f);
 

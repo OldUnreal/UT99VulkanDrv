@@ -329,6 +329,10 @@ private:
 		CachedTexture* detailtex;
 		CachedTexture* fogmap;
 		vec4* editorcolor;
+		// U,V pairs for tex, lightmap, macrotex, detail/fogmap. Taken from each layer's FTextureInfo:
+		// layers sharing a CacheID share one CachedTexture, whose Pan/Mult only hold the last lookup.
+		float pan[8];
+		float mult[8];
 	};
 	void DrawComplexSurfaceFaces(const ComplexSurfaceInfo& info);
 
